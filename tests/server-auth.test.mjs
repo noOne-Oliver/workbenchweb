@@ -167,3 +167,35 @@ test("首次启动自动建 lead 账号，一次性口令只打印一次，能�
     rmSync(ws3, { recursive: true, force: true });
   }
 });
+test("口令连错 5 次就锁：第 6 次 429，正确口令也进不去（防在线爆破）", async () => {
+  const p4 = await freePort();
+  const ws4 = mkdtempSync(join(tmpdir(), "wb-auth4-"));
+  const s4 = spawn(process.execPath, [join(ROOT, "src/server/index.mjs")], {
+    env: { ...process.env, WB_ROOT: ws4, WB_CODE: ROOT, WB_PORT: String(p4), WB_HOST: "127.0.0.1", WB_TOKEN: "", WB_ADMIN_NAME: "boss" },
+    stdio: ["ignore", "pipe", "ignore"],
+  });
+  try {
+    let out = "";
+    s4.stdout.on("data", (d) => { out += String(d); });
+    let pw = null;
+    for (let i = 0; i < 60 && !pw; i++) {
+      await sleep(200);
+      const m = out.match(/一次性口令: (\S+)/);
+      if (m) pw = m[1];
+    }
+    assert.ok(pw, "得有一次性口令才能测登录");
+    const login = (password) => fetch("http://127.0.0.1:" + p4 + "/api/login", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "boss", password }),
+    });
+    for (let i = 0; i < 5; i++) assert.equal((await login("wrong-" + i)).status, 401, "第 " + (i + 1) + " 次错口令是 401");
+    const locked = await login("wrong-again");
+    assert.equal(locked.status, 429, "第 6 次该被锁");
+    assert.ok(Number(locked.headers.get("retry-after")) > 0, "要告诉客户端等多久");
+    assert.equal((await login(pw)).status, 429, "锁住期间正确口令也不放行（否则爆破只要猜对一次）");
+  } finally {
+    s4.kill("SIGKILL");
+    rmSync(ws4, { recursive: true, force: true });
+  }
+});

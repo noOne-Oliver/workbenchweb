@@ -1,51 +1,41 @@
-# 工作台 (Workbench) v0
+# 工作台 (Workbench) · Web 版
 
 一个「AI 团队分工写代码、人只负责 review」的后台执行器。
-你提交任务 → 后台自动 规划/实现/验收/复核 → 卡在两段人工：`awaiting_review`（agent 复核后先给你初筛）与 `awaiting_approval`（终审批准）→ 你说合或不合。
+你提交任务 → 后台自动 规划/实现/验收/复核 → 卡在两段人工：`awaiting_review`（初筛：这件事做对了吗）与 `awaiting_approval`（终审：要不要合）→ 你说合或不合。
 
 人只回答一个问题：**要不要合**。其余全部自动重试、自动升级、自动归档。
 
-两种用法，同一份内核：
+形态：**一台机器当 runner**（一个常驻进程），其他人用浏览器打开它 —— 不用装 app，也不用碰终端。加人就是加账号，提交、初筛、批准都在浏览器里完成。
 
-| 用法 | 适合谁 | 怎么开始 |
-| --- | --- | --- |
-| **A. 桌面版（macOS app）** | 不想碰终端，双击就要用 | [下载 Workbench-0.2.0.zip](https://github.com/noOne-Oliver/workbench/releases/latest)（11 MB，macOS 13+ / Apple Silicon，内核已打包） |
-| **B. Web 版（浏览器）** | 有 node 的机器、想跑在服务器上 | 见下面「30 秒跑起来」，或 `node src/cli.mjs up` 一条命令起全套 |
+> 仓库分工：这个仓库只有 **Web 版**（内核 + 服务端 + 浏览器界面）。macOS 桌面版（Swift 外壳，把同一套内核打包进 .app）在 [noOne-Oliver/workbench](https://github.com/noOne-Oliver/workbench)。两边**不共享任何文件**：这里不构建 app、不打包、不提 .app。
 
-> 仓库分工：macOS 桌面版在 [noOne-Oliver/workbench](https://github.com/noOne-Oliver/workbench)，Web 版在 [noOne-Oliver/workbenchweb](https://github.com/noOne-Oliver/workbenchweb)。两边是同一套内核代码，差别只在分发方式。
+## 起起来
 
-## A. 桌面版（macOS）
-
-**[下载 Workbench-0.2.0.zip](https://github.com/noOne-Oliver/workbench/releases/latest)** · 11 MB · macOS 13+ / Apple Silicon · 内核（node + src + web）已在包内，**不需要另装 node**。
-
-1. 解压，把 `Workbench.app` 拖进「应用程序」。
-2. 第一次打开必须**右键 → 打开**（没有苹果公证，双击会被 Gatekeeper 拦住）。也可以：`xattr -dr com.apple.quarantine /Applications/Workbench.app`
-3. 启动后选一个工作区目录（默认 `~/Workbench`）。它会自己建账本、建起始仓库 `demo/`，并在本机起内核 —— 之后提交任务、后台自动跑、到评审时找你。
-
-```
-sha256: ddaf261ebc4e440a6bb50f0cc2ceedbf13b31887cdd395b49604e6f2b5ed41a2  Workbench-0.2.0.zip
-```
-
-自己构建 / 重新打包：
+第一次先建工作区（账本 + worktree 目录 + 起始仓库 `demo/`，幂等，重复跑不会覆盖已有内容）：
 
 ```bash
-bash apps/macshell/build.sh      # → dist/Workbench.app（swiftc 编外壳 + 拷内核 + ad-hoc 签名）
-bash scripts/package-mac.sh      # → dist/Workbench-<版本>.zip（有 hdiutil 时同时出 .dmg）
-npm run verify:package           # 六断言：离仓可运行 / 工作区正确 / worker 真跑 / SIGTERM 干净 / kill -9 无孤儿 / worker 崩了自愈
+node src/cli.mjs workspace --dir ~/Workbench
 ```
 
-## B. Web 版（浏览器）
-
-不装 app，直接用 node 起内核：server + 看护着的 worker 一次拉起来，浏览器打开 `http://127.0.0.1:7317` 就是评审收件箱。
+然后一条命令起整套（server + 看护着的 worker；worker 崩了按 1s→2s→4s…封顶 30s 退避自动拉起）：
 
 ```bash
-node src/cli.mjs workspace --dir ~/Workbench   # 第一次：建工作区（账本 + 起始仓库）
-WB_ROOT=~/Workbench node src/cli.mjs up        # 起内核（worker 崩了会自动重启）
+WB_ROOT=~/Workbench node src/cli.mjs up      # → http://127.0.0.1:7317
 ```
 
-要开机自启/常驻，交给 `launchd` 或 systemd 拉起同一条 `cli.mjs up` 即可；`GET /api/health` 会告诉你执行器是不是还活着。
+第一次启动会建一个 `lead` 账号并在终端打印一次性口令 —— 用它登录，然后在页面右上角「成员」里加人。
 
-## 30 秒跑起来
+要常驻（关掉终端也不停），交给 launchd / systemd 拉起同一条命令：
+
+```bash
+launchctl submit -l local.workbench.kernel -- /bin/bash scripts/run-kernel.sh
+```
+
+`GET /api/health` 告诉你执行器是不是还活着（免登录，只有 pid / 心跳 / 版本，不吐任务内容）。
+
+页面上方「＋ 新建任务」直接建任务：填一句话、目标仓库、token 预算，提交就走 `POST /api/tasks`，worker 自动开跑，到初筛/终审时才找你。
+
+## 30 秒跑起来（本地演示，假引擎，不花钱）
 
 ```bash
 npm run init                 # 建账本 + 初始化 demo 仓库
@@ -56,7 +46,7 @@ npm run serve                # 打开 http://127.0.0.1:7317 审阅
 
 默认引擎是 `mock`（确定性假引擎，用来验证流水线与护栏），不需要任何 API key、不花钱。
 
-![评审收件箱](docs/shell-shot.png)
+![评审收件箱（浏览器）](docs/inbox.png)
 
 ## 它凭什么能无人值守
 
@@ -127,7 +117,7 @@ npm test                                           # 内核测试（状态机/�
 | `WB_OC_HOME` | `./.oc` | opencode 的 XDG 数据目录（见下节：它必须能写，否则直接崩） |
 | `WB_BUDGET` | `1000000` | 单任务 token 预算；真引擎一个任务约 36–48 万，20 万会中途熔断 |
 | `WB_ROOT` | 当前目录 | **数据根**：账本、worktree、起始仓库都在它下面 |
-| `WB_CODE` | 同 `WB_ROOT` | **代码根**：`web/` 从 `WB_CODE/web` 取。打包成 app 后这两个不是一回事，见「桌面外壳」 |
+| `WB_CODE` | 同 `WB_ROOT` | **代码根**：`web/` 从 `WB_CODE/web` 取。默认与数据根相同；把内核放在别处（只读挂载、容器镜像）时才需要分开 |
 | `WB_WORKSPACE` | 空 | app 用：工作区目录（优先级最高，压过 UserDefaults 里存的选择） |
 | `WB_NO_NPM` | 空 | 设成 1 强制让护栏走 `node --test`，用来复现「机器上没有 npm」的退路 |
 | `WB_HEARTBEAT_MS` | `15000` | 每跑一个 agent 多久落一次心跳（`agent.heartbeat`），界面靠它显示「已跑 1m23s」 |
@@ -191,9 +181,9 @@ divzero    awaiting_human      1   477178   311 pass
 
 人工闭环也验过：approve → `merging` → `git merge --no-ff` → `done`，demo 仓库出现合并提交 `wb: merge 实现 src/slug.mjs ...`。
 
-### 打包后跑真任务（2026-11-22，app 内，同模型）
+### 真任务实测（2026-11-22，同模型）
 
-在打包好的 `.app` 里跑（工作区 `/tmp/wb-real-ws`，凭据由 `cred import` 搬进工作区，不随包分发、不进仓库）：
+在工作区 `/tmp/wb-real-ws` 里跑真引擎（凭据用 `cred import` 搬进工作区，不进仓库）：
 
 ```
 任务                         状态             尝试 token     护栏    Verifier
@@ -210,50 +200,9 @@ diff: 3 files changed, 46 insertions(+)
 判断「要不要重试」这件事本身也得有依据：同样是「没有正文」，权限拒绝重试一百次也一样，
 限流/偶发空回才值得再给一次机会 —— 这个区分现在写在 `classifyFailure` 里，有单测（`tests/opencode-failure.test.mjs`）。
 
-## 桌面外壳（方案 2）
+## 多人怎么用
 
-打包后没有终端，所以**界面里能直接建任务**：顶部「＋ 新建任务」填一句话、目标仓库、token 预算，提交就走 `POST /api/tasks`，worker 自动开跑；页面上的工作区/内核/引擎路径来自 `GET /api/workspace`（用来一眼看出这次连的是哪个内核、哪个工作区）。
-
-`apps/macshell/` 用 Swift + AppKit + WKWebView 把上面那个三栏收件箱装进一个原生窗口，**界面逻辑一行没改**；
-并且**把内核一起打包进 app**：`Contents/Resources/kernel/` 里是打包用的 node、内核（`src/`）和前端（`web/`）。
-所以 app 拷到 `/tmp`、拷到 `/Applications` 都能直接跑 —— 不需要仓库，也不需要本机装 node。
-
-外壳起**两个**子进程：`server`（HTTP + 静态页面）和 `worker`（常驻任务循环）。
-只起 server 任务会永远排队，所以两个都起；已经在跑就**纯 attach**（不动别人的进程，也不再起 worker）。默认 1200×800，⌘R 刷新、⌘O 打开工作区数据目录、⌘Q 退出。
-
-数据在**工作区**里（账本、worktree、起始仓库 `demo/`），和 app 分开：`WB_WORKSPACE` → `UserDefaults` 的 `workspace` → `~/Workbench`；目录不存在时弹原生面板让你选（可新建），取消就退回 `~/Workbench`。
-
-```bash
-bash apps/macshell/build.sh              # swiftc 编译 + 内核打包 + ad-hoc 签名 → dist/Workbench.app
-open -a "$PWD/dist/Workbench.app"
-
-# 无头自检：定位内核 → 准备工作区 → attach 或起 server+worker → 请求 /api/tasks
-WB_SHELL_SMOKE=1 dist/Workbench.app/Contents/MacOS/Workbench
-# kernel=ok tasks=0 mode=spawn port=7317 workspace=/Users/liujie/Workbench code=.../Resources/kernel engine=mock
-
-# 证据截图：加载页面 → 打印 DOM 断言（卡片数/正文）→ 存 PNG → 退出
-WB_SHELL_SHOT=docs/shell-shot.png dist/Workbench.app/Contents/MacOS/Workbench
-# dom={"cards":3,...}
-# shot=ok path=/.../docs/shell-shot.png bytes=214438 size=1446x894
-```
-
-上面这张图就是这条命令在真 app 里抓下来的，不是浏览器截图：**窗口真的把收件箱画出来了**（DOM 断言 3 张卡片、正文含任务标题与预算）。
-
-边界：ad-hoc 签名只能本机跑（无公证、无 App Sandbox）；`kernel/node` 是 homebrew 的动态链接版，换机器要重新 `build.sh`。详见 [docs/shell.md](docs/shell.md)。
-
-打包有没有真的可用，跑一条命令就知道：它会拿 `.app` 当已安装产物、故意在 `/tmp` 里起、提交一个任务、等它到待裁决，然后**分别**用 SIGTERM 和 `kill -9` 收工两次，确认端口都关掉、不留孤儿内核。
-
-```bash
-npm run verify:package -- --port 7641
-# states=queued → verifying → awaiting_human
-# SIGTERM：端口已关闭
-# SIGKILL：3.0 秒后内核自己收工，没留孤儿
-# PASS 离仓可运行 / 工作区正确 / worker 真跑 / SIGTERM 干净 / kill -9 无孤儿
-```
-
-## Web 版（浏览器访问，不需要 .app）
-
-桌面外壳是「一个人的本机工具」；**Web 版是团队形态**：一台机器当 runner，其他人用浏览器访问同一个后台执行器。一条命令起服务：
+一台机器当 runner，其他人用浏览器访问同一个后台执行器。想省事就用启动器（自动写 pid/日志/token 到 `<工作区>/.wb/`）：
 
 ```bash
 npm run web                          # 默认 host 0.0.0.0、端口 7317、工作区 ~/Workbench
@@ -473,22 +422,18 @@ npm run web:stop     # SIGTERM，8 秒不退再 SIGKILL
 
 ![Web 版 review 界面（右上角多了「退出」）](docs/web-review.png)
 
-### 和 .app 的关系
+### 和桌面版的关系
 
-| | 桌面 app | Web 版 |
-| --- | --- | --- |
-| 形态 | 双击打开的 .app，内核打包在里面 | 服务端进程 + 浏览器 |
-| 适合 | 一个人、本机 | 2~3 人、内网 |
-| 口令 | 不需要（只有本机能连） | 需要 |
-| 数据 | 同样在工作区 | 同样在工作区 |
-
-两者可以同时存在（不同端口、不同工作区）。**.app 不是被替换掉，Web 版也不依赖它**。
-
+两个仓库、两套交付：桌面版把内核装进 `.app` 发给一个人用；这里把内核当服务跑起来，给一个团队用浏览器连。**内核是同一套逻辑，但代码不互相依赖** —— 桌面版将来要跟着升级，是它自己去取这个仓库的发布版，而不是两边各存一份源码。
 ### 安全边界（别踩）
 
 - 默认是 **HTTP 明文 + 单口令**：只适合内网/同一 Wi-Fi。要出公网，请套 Tailscale 或 nginx + HTTPS 反代，别直接端口映射。
 - 现在一人一号：审计看事件里的 `actor`，`review.claimed` / `review.passed` / `human.decision` 分别记领取人、初筛人、批准人。`WB_TOKEN` 只是脚本通道（记 `by=cli`），别发给人。
 - 工作区里的 `.oc/private/provider.env` 是真模型凭据，别把工作区目录共享出去。
+- **静态文件按路径段校验**（`src/server/index.mjs` 的 `resolveStatic`）：判断依据是 `relative(WEB, file)` 不以 `..` 开头，不是 `startsWith(WEB)` —— 后者会把 `web-secret` 这种兄弟目录当成"在 web 里面"。
+- **登录有退避**：同一个人名连错 5 次锁 60 秒，之后每次翻倍、封顶 10 分钟（第 6 次回 429 + `Retry-After`，锁住期间正确口令也不放行）。计数在内存里，重启即清空、多实例不共享——挡的是在线爆破，不是分布式撞库。
+- **前端不拼内联 `onclick`**：用户名只进 `data-*`，点击走事件委托。`onclick="f('名字')"` 只要名字里有个单引号就能跳出字符串。
+- 明确的缺口：没有 CSRF token（靠 `SameSite=Lax`）、没有 HTTPS、没有 2FA。这些的前提都是"先套反代"，不是本项目内部该解决的。
 
 ## 重试闭环（护栏 FAIL → 打回 → 重做 → 通过）
 
@@ -625,24 +570,20 @@ kill -9 $(curl -s http://127.0.0.1:7317/api/health | node -e 'let s="";process.s
 sleep 4 && curl -s http://127.0.0.1:7317/api/health
 ```
 
-打包产物里这条链路是端到端的，`npm run verify:package` 会真杀一次 worker 再等它自己起来：
+Web 版验这条链路不用打包，直接杀进程看它自己回不回来：`kill -9` 掉 worker，4 秒后 `/api/health` 里的 pid 就是新的：
 
+```bash
+curl -s http://127.0.0.1:7317/api/health
+kill -9 $(curl -s http://127.0.0.1:7317/api/health | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>console.log(JSON.parse(s).worker.pid))')
+sleep 4 && curl -s http://127.0.0.1:7317/api/health
 ```
-states=queued → verifying → awaiting_review
-SIGTERM：端口已关闭
-SIGKILL：3.0 秒后内核自己收工，没留孤儿
-watchdog：52873 被杀 → 52878 接管（1s 前心跳）
-PASS 离仓可运行 / 工作区正确 / worker 真跑 / SIGTERM 干净 / kill -9 无孤儿 / worker 崩了自愈
-```
-
 ![执行器在线：标题栏常驻心跳，断线就变红](docs/executor-live.png)
 
 事故当天的账本已从 17GB 删掉重建（`data/` 是 gitignore 的本地状态，重建只需 `node src/cli.mjs workspace --dir .`）。
 
 ## v0 不做什么（故意的）
 
-- 不做多人实时协作（多租户 = 5 倍工作量）；多人场景先用「一台 Mac 当 runner + 内网 + 单 token」，owner 绑唯一 reviewer。
-- 不做苹果签名/上架（无法自动化，闭环终点是测试通过 + 可归档产物）。
+- 不做多租户/组织树（5 倍工作量）；先做「一台机器当 runner + 内网 + 一人一号」，owner 绑唯一 reviewer。
 - 不做富 UI 编辑，不做代码内联批注，只有「合 / 不合 + 一句话理由」。
 
 ## 目录
@@ -654,8 +595,7 @@ src/server/   HTTP + 静态审阅界面
 web/          审阅收件箱（三栏：待裁决 / 后台在跑 / 归档 + 新建任务表单 + 按文件分组的 diff / 测试清单 / 全屏原始输出）
 sandbox/demo/ 演示用目标仓库（有真测试，能真跑）
 tests/        内核测试
-scripts/      Web 版启动器（workbench）、demo 重置、重试闭环演示（demo-retry）、引擎体检（engine-smoke）、真引擎基准（bench / bench-real）、打包复验（verify-package）
-apps/macshell/ macOS 桌面外壳（Swift + AppKit + WKWebView；内核打包进 app，离仓可运行）
+scripts/      启动器（workbench / run-kernel）、demo 重置、重试闭环演示（demo-retry）、引擎体检（engine-smoke）、真引擎基准（bench / bench-real）、截图（shots）
 ```
 
 ## License

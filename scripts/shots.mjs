@@ -5,7 +5,7 @@
  * 工作区放在 /tmp/workbench-demo（不是 /Users/<你的名字>/...），任务 owner 用 oliver。
  * 截完会读一遍 DOM 断言：页面上不出现 "/Users/" 和本机用户名，出现就报错不写文件。
  *
- * 用法：node scripts/shots.mjs   → docs/{shell-shot,executor-live,activity-shot,review-diff,review-raw,web-login,web-review}.png
+ * 用法：node scripts/shots.mjs   → docs/{inbox,executor-live,activity-shot,review-diff,review-raw,web-login,web-review}.png
  */
 import { spawn, spawnSync } from "node:child_process";
 import { rmSync, writeFileSync, mkdirSync } from "node:fs";
@@ -141,7 +141,7 @@ async function phaseNoAuth(base, cdpPort) {
 
   // 整页是 body flex + main 自己滚（body 是 overflow:hidden），所以 window.scrollTo 没用，要滚 main。
   await evalJs("(() => { const m = document.querySelector('main'); if (m) m.scrollTop = 0; window.scrollTo(0, 0); })()");
-  await shot("shell-shot.png");
+  await shot("inbox.png");
   // 执行器徽章在图里很小，单独裁一条头部，README 里才看得清"在线/断线"这件事
   await shot("executor-live.png", { clip: { x: 0, y: 0, width: 1446, height: 74 } });
   await shot("activity-shot.png", { scrollTo: "() => { const m = document.querySelector('main'); if (m) m.scrollTop = m.scrollHeight; const e = document.getElementById('events'); if (e) e.scrollTop = e.scrollHeight; }" });

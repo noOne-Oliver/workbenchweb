@@ -427,16 +427,28 @@ async function fetchUsers() {
 }
 
 function teamRow(u) {
-  return "<tr><td>" + esc(u.name) + "</td><td>" + esc(ROLE_LABEL[u.role] || u.role) + "</td><td>" +
+  // 名字只进 data-*，不进内联 onclick：onclick="f('名字')" 只要名字里有单引号就能跳出字符串。
+  const n = esc(u.name);
+  return "<tr><td>" + n + "</td><td>" + esc(ROLE_LABEL[u.role] || u.role) + "</td><td>" +
     (u.active ? (u.hasPassword ? "可登录" : "未设口令") : "已停用") + "</td><td>" +
-    '<button class="ghost" onclick="resetPassword(\'' + esc(u.name) + '\')">重置口令</button>' +
-    '<button class="ghost" onclick="toggleUser(\'' + esc(u.name) + '\',' + (u.active ? "false" : "true") + ')">' +
+    '<button class="ghost" data-act="reset" data-name="' + n + '">重置口令</button>' +
+    '<button class="ghost" data-act="' + (u.active ? "disable" : "enable") + '" data-name="' + n + '">' +
     (u.active ? "停用" : "启用") + "</button></td></tr>";
 }
 
 window.openTeam = async function () {
   const dlg = el("team");
   const box = el("team-body");
+  if (box && !box.dataset.bound) {
+    box.dataset.bound = "1";
+    box.addEventListener("click", (ev) => {
+      const btn = ev.target.closest ? ev.target.closest("button[data-act]") : null;
+      if (!btn) return;
+      const name = btn.dataset.name;
+      if (btn.dataset.act === "reset") return resetPassword(name);
+      return toggleUser(name, btn.dataset.act === "enable");
+    });
+  }
   if (!dlg.open) dlg.showModal();
   box.innerHTML = '<div class="hint">加载中…</div>';
   const users = await fetchUsers();

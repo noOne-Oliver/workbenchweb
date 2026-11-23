@@ -1,6 +1,6 @@
 import { createServer } from "node:http";
 import { readFile } from "node:fs/promises";
-import { extname, join, resolve } from "node:path";
+import { extname, isAbsolute, join, relative, resolve } from "node:path";
 import { openDb } from "../core/db.mjs";
 import { createTask, getTask, listTasks, transition, record, addEvidence, migrateReviewStates } from "../core/ledger.mjs";
 import { readForTask } from "../core/events.mjs";
@@ -33,6 +33,20 @@ function json(res, code, obj) {
   res.end(body);
 }
 
+/**
+ * 把 URL 路径解析成 web 目录里的文件。越界返回 null。
+ * 按路径段比较（relative 后看是否以 .. 开头），不用字符串前缀——
+ * startsWith 会把 /web-secret/x 这种兄弟目录误判成"在 web 里面"。
+ */
+export function resolveStatic(webDir, urlPath) {
+  const raw = String(urlPath || "/");
+  const rel = raw === "/" ? "/index.html" : raw;
+  const file = join(webDir, rel);
+  const out = relative(webDir, file);
+  if (out.startsWith("..") || isAbsolute(out)) return null;
+  return file;
+}
+
 const COOKIE = "wb_token";
 
 function cookies(req) {
@@ -47,6 +61,32 @@ function cookies(req) {
 
 function setCookie(res, value, maxAge) {
   res.setHeader("set-cookie", COOKIE + "=" + encodeURIComponent(value) + "; Path=/; HttpOnly; SameSite=Lax; Max-Age=" + maxAge);
+}
+
+// 登录失败退避：同一个人名连续错 5 次就锁 60 秒，之后每次翻倍，封顶 10 分钟。
+// 内网也值得有——worker 跑在没人看的机器上，暴力破解不需要人配合。
+const LOGIN_FAILS = new Map();
+const LOGIN_MAX_FAILS = 5;
+const LOGIN_BASE_LOCK_MS = 60_000;
+const LOGIN_MAX_LOCK_MS = 10 * 60_000;
+
+function loginLocked(name, now = Date.now()) {
+  const e = LOGIN_FAILS.get(name);
+  if (!e || !e.until || e.until <= now) return 0;
+  return Math.ceil((e.until - now) / 1000);
+}
+
+function noteLoginFail(name, now = Date.now()) {
+  const e = LOGIN_FAILS.get(name) || { n: 0, until: 0 };
+  e.n += 1;
+  if (e.n >= LOGIN_MAX_FAILS) {
+    const extra = Math.min(LOGIN_MAX_LOCK_MS, LOGIN_BASE_LOCK_MS * 2 ** (e.n - LOGIN_MAX_FAILS));
+    e.until = now + extra;
+  }
+  LOGIN_FAILS.set(name, e);
+  if (LOGIN_FAILS.size > 1000) {
+    for (const [k, v] of LOGIN_FAILS) if (!v.until || v.until <= now) LOGIN_FAILS.delete(k);
+  }
 }
 
 async function readBody(req) {
@@ -89,10 +129,18 @@ export function createApp(db) {
           setCookie(res, TOKEN, SESSION_TTL);
           return json(res, 200, { ok: true, tokenRequired: true, user: { name: "cli", role: "lead" } });
         }
-        const u = getUser(db, b.name);
+        const name = String(b.name ?? "").trim();
+        const wait = loginLocked(name);
+        if (wait > 0) {
+          res.setHeader("retry-after", String(wait));
+          return json(res, 429, { error: "口令错太多次，等 " + wait + " 秒再试" });
+        }
+        const u = getUser(db, name);
         if (!u || !u.active || !verifyPassword(b.password, u.password_hash)) {
+          noteLoginFail(name);
           return json(res, 401, { error: "用户名或口令不对" });
         }
+        LOGIN_FAILS.delete(name);
         setCookie(res, signSession(SECRET, { name: u.name, role: u.role, version: u.secret_version }), SESSION_TTL);
         return json(res, 200, { ok: true, user: publicUser(u) });
       }
@@ -298,8 +346,8 @@ export function createApp(db) {
           res.writeHead(302, { location: "/login.html", "cache-control": "no-store" });
           return res.end();
         }
-        const file = join(WEB, rel.replace(/^\.\./, ""));
-        if (!file.startsWith(WEB)) return json(res, 403, { error: "forbidden" });
+        const file = resolveStatic(WEB, rel);
+        if (!file) return json(res, 403, { error: "forbidden" });
         try {
           const body = await readFile(file);
           res.writeHead(200, { "content-type": MIME[extname(file)] || "application/octet-stream" });
