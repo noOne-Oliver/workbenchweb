@@ -24,6 +24,7 @@
     "demo:real": "node scripts/demo-real-review.mjs --fresh",
     "bench:real": "node scripts/bench-real.mjs --fresh",
     "shot:roles": "node scripts/shot-roles.mjs",
-    "shots": "node scripts/shots.mjs"
+    "shots": "node scripts/shots.mjs",
+    "docs:diagrams": "node scripts/make-diagrams.mjs"
   }
 }
