@@ -207,7 +207,8 @@ check("杂活估算人只需要 1 分钟", met3.human_minutes <= 2, String(met3.
 const secs = Math.round((Date.now() - t0) / 1000);
 const report = { at: new Date().toISOString(), workspace: WS, seconds: secs, checks: rows, failed: fails };
 mkdirSync(join(ROOT, "docs"), { recursive: true });
-const outFile = join(ROOT, "docs", "stage-demo-" + new Date().toISOString().replace(/[:.]/g, "-") + ".json");
+// 固定文件名：每次跑覆盖上一次，仓库里不会攒一堆带时间戳的报告（docs/stage-demo*.json 已 gitignore）。
+const outFile = join(ROOT, "docs", "stage-demo.json");
 writeFileSync(outFile, JSON.stringify(report, null, 2) + "\n");
 
 console.log("\n" + (fails.length ? "FAIL " + fails.length + " 项" : "全部通过") + " · " + rows.length + " 项检查 · " + secs + " 秒");

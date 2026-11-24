@@ -222,7 +222,7 @@ AI 写代码的工具已经很多了，**能无人值守跑一天的很少**。�
 5. **角色先于人、后于 agent**：`AGENT_FOR_ROLE` 把 designer / architect / coder / integrator 映射到具体 agent（`src/core/workflows.mjs`）；现在人当角色，之后换 Agent 只改一张表。
 6. **阶段是任务的容器，不是另一套执行器**：开工时 `startStage` 只是建一个普通 task 并打上 `stage_id`，租约 / 预算 / 护栏 / 两段评审全部复用 —— 没有第二条执行路径可以偷偷退化。
 
-实测（不需要模型，5 秒）：`npm run demo:stage` → 31 项检查全过，4 阶段跑完 + 2 次签字 + 1 个反例（agent 在设计阶段顺手改实现，被 `stage_scope` 打回、任务 `blocked`、越界文件自动落 backlog）；报告落 `docs/stage-demo-*.json`。
+实测（不需要模型，5 秒）：`npm run demo:stage` → 31 项检查全过，4 阶段跑完 + 2 次签字 + 1 个反例（agent 在设计阶段顺手改实现，被 `stage_scope` 打回、任务 `blocked`、越界文件自动落 backlog）；报告落 `docs/stage-demo.json`（固定文件名，每次覆盖，已 gitignore）。
 
 ---
 ## 五、界面长什么样
@@ -443,6 +443,7 @@ WB_ENGINE=opencode WB_MODEL=<provider/model> WB_BUDGET=1000000 WB_ROOT=~/Workben
 | 阶段闸门 | 设计与契约阶段真的产出 `docs/design.md`、`docs/design.svg`、`docs/contract.md` 并进主干；实现阶段护栏 8/8 全绿 |
 | 反例 | agent 在设计阶段改 `src/calc.mjs` → `stage_scope` FAIL 点名、任务 `blocked`、越界文件自动落 backlog |
 | 收尾 | 合并阶段 done 后项目自动 done；总签字 2 次；人估算 10 分钟 |
+| 界面三步真点 | 无头浏览器点「下一阶段做」→「签 A 组」→「开工 1 设计」：状态变「进行中」、出现「已签 A 组（设计+契约）· lead0：…」、任务卡 3→4、开工按钮消失、没有弹错误（`npm run shot:projects`） |
 
 ---
 
@@ -530,6 +531,14 @@ npm test                                         # 内核测试（90 项）
 | 报错时**不退出** | 实测挂 13 分钟、stdout 0 字节 | 盯它自己的日志文件，命中限流/额度/鉴权字样立刻 SIGKILL |
 | 空产出但 exit 0 | 看起来「干完了」，其实什么都没做 | 文本为空即判失败，绝不当成功 |
 | 规划阶段读工作区被拒 | `PermissionRejectedError`，整轮只剩工具调用 → 被当空产出重试，57 秒烧 22.5 万 token | ① 生成 `permission-overlay.json` 只读放行工作区根 ② 权限拒绝归类为**确定性失败**直接 `blocked`，不再重试 ③ 原始事件落盘 `logs/fail-*.jsonl`（留最近 5 个） |
+
+### 界面上的按钮，也要从人手指那一下测起
+
+按钮不只是渲染 HTML，它是**唯一一条人真的会走的路径**，所以截图脚本最后三步改成真点：先分流一条发散项、再签 A 组、再开工设计阶段，然后断言界面自己变了（状态、已签行、任务卡数量、按钮消失）。
+
+这条测试当场抓到一个单元测试永远抓不到的 bug：按钮带的是 `stage_id`（`s_mwuvzqzaa381z`），而 `findStage(project, ref)` 只认序号和中文阶段名 —— 于是「开工」在界面上永远返回 400「没有这个阶段」，后端却一切正常（单测走的是 `startStage(db, id, "设计")`）。修在 `src/core/stages.mjs:324`，并在 `tests/stages.test.mjs` 补了按 `stage_id` 开工的断言。
+
+> 教训：接口测试证明「能力存在」，点击测试证明「人能用上」。差一个「URL 里塞不下的中文名」，就够了。
 
 ### 回归基线怎么比
 

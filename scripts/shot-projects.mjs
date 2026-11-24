@@ -3,7 +3,7 @@
  * 给「项目 / 阶段链」界面留证据：一个项目推进到实现阶段等人初筛，一个停在待签字。
  * 用 WB_ENGINE=stage（确定性按阶段产出）跑，不联网、几秒完成。
  */
-import { spawn } from "node:child_process";
+import { execSync, spawn } from "node:child_process";
 import { rmSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { ensureWorkspace } from "../src/core/workspace.mjs";
@@ -17,6 +17,14 @@ const OUT = resolve(ROOT, process.env.SHOT_OUT || "docs/projects.png");
 const CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// 上一次跑挂了会留下占着端口的服务（它握着的还是旧工作区），先收掉，
+// 否则新口令没人打印、登录必然失败。
+try {
+  const pids = execSync("lsof -nP -iTCP:" + PORT + " -sTCP:LISTEN -t", { encoding: "utf8" }).trim().split(/\s+/).filter(Boolean);
+  for (const pid of pids) { process.kill(Number(pid), "SIGTERM"); console.log("清掉残留服务 pid=" + pid); }
+  if (pids.length) await sleep(600);
+} catch { /* 端口空闲，lsof 退出码 1 */ }
+
 rmSync(WS, { recursive: true, force: true });
 const ws = ensureWorkspace(WS);
 
@@ -26,6 +34,11 @@ const server = spawn(process.execPath, [resolve(ROOT, "src/server/index.mjs")], 
   stdio: ["ignore", "pipe", "pipe"],
 });
 let srvOut = "";
+// 中途 throw 时也要收掉子进程，不然下次跑就撞端口。
+const cleanup = () => { try { server.kill("SIGTERM"); } catch { /* ignore */ } };
+process.on("exit", cleanup);
+process.on("uncaughtException", (e) => { console.error(e); cleanup(); process.exit(1); });
+process.on("unhandledRejection", (e) => { console.error(e); cleanup(); process.exit(1); });
 server.stdout.on("data", (d) => { srvOut += String(d); });
 server.stderr.on("data", (d) => { srvOut += String(d); });
 
@@ -190,6 +203,52 @@ const shot = await send("Page.captureScreenshot", { format: "png", captureBeyond
 const buf = Buffer.from(shot.data, "base64");
 writeFileSync(OUT, buf);
 console.log("shot=ok bytes=" + buf.length + " -> " + OUT);
+
+// ---- 5) 截图之后再真点一次按钮：证明 onclick -> POST -> 重渲染这条路是通的 ----
+// prompt/alert 在无头窗口里会阻塞或返回 null，这里替身掉，否则点了等于没点。
+const ui = await evalJs(`(async () => {
+  window.prompt = () => "UI 点击验证：方向认可";
+  window.__alerts = [];
+  window.alert = (m) => window.__alerts.push(String(m));
+  const proj = () => document.querySelector(".proj");
+  const pick = (re) => [...proj().querySelectorAll("button")].find((b) => re.test(b.textContent));
+  // 顺序很重要：有未分流的发散项时签字会被拦（「还有 N 条发散项没分流」），
+  // 所以先点一次分流按钮，再点签字——这正是人在这页上真实的操作顺序。
+  const triage = pick(/^下一阶段做/);
+  if (triage) { triage.click(); await new Promise((r) => setTimeout(r, 1200)); }
+  const btn = pick(/^签 A 组/);
+  if (!btn) return { clicked: false, triaged: !!triage, buttons: [...proj().querySelectorAll("button")].map((b) => b.textContent) };
+  btn.click();
+  await new Promise((r) => setTimeout(r, 1800));
+  // 顺手点一次「开工」：这是人在这页上的第二个动作，走 startStage -> POST -> 生出任务卡。
+  const before = document.querySelectorAll(".card").length;
+  const start = [...proj().querySelectorAll("button")].find((b) => /^开工 1 设计/.test(b.textContent));
+  if (start) { start.click(); await new Promise((r) => setTimeout(r, 1500)); }
+  const after = document.querySelectorAll(".card").length;
+  const p = proj();
+  return {
+    clicked: true,
+    triaged: !!triage,
+    started: !!start,
+    startButtonGone: ![...proj().querySelectorAll("button")].some((b) => /^开工/.test(b.textContent)),
+    cardsBefore: before,
+    cardsAfter: after,
+    alerts: window.__alerts,
+    stageChips: [...p.querySelectorAll(".stg")].map((x) => x.textContent),
+    state: p.querySelector(".badge")?.textContent,
+    signed: [...p.querySelectorAll(".row")].map((x) => x.textContent).filter((t) => /已签/.test(t)),
+    backlogBadge: [...p.querySelectorAll(".backlog .badge")].map((x) => x.textContent),
+    buttons: [...p.querySelectorAll("button")].map((b) => b.textContent),
+  };
+})()`);
+console.log("ui-click:", JSON.stringify(ui));
+if (!ui.clicked) throw new Error("找不到「签 A 组」按钮: " + JSON.stringify(ui));
+if (!/已签 A 组/.test(ui.signed.join(" "))) throw new Error("点了签字但界面没更新: " + JSON.stringify(ui));
+if (!ui.started) throw new Error("签完没出现「开工 1 设计」按钮: " + JSON.stringify(ui));
+if (ui.cardsAfter <= ui.cardsBefore) throw new Error("点了开工但没生出任务卡: " + JSON.stringify(ui));
+if (!ui.startButtonGone) throw new Error("开工后按钮还在，可能重复起了任务: " + JSON.stringify(ui));
+if (ui.alerts && ui.alerts.length) throw new Error("界面动作报错了: " + JSON.stringify(ui.alerts));
+console.log("ui-click=ok 分流→签字→开工三步都在界面上点通了（任务卡 " + ui.cardsBefore + " → " + ui.cardsAfter + "）");
 
 sock.close();
 chrome.kill("SIGKILL");

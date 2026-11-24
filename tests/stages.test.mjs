@@ -100,6 +100,14 @@ test("开工闸门：没签字不能开工，跳关不能开工，开工后阶�
   assert.equal(out.task.project_id, p.id);
   assert.equal(getProject(db, p.id).stages[0].state, "running");
   assert.throws(() => startStage(db, p.id, "设计", { by: "alice" }), /已经有任务/);
+  // 界面上的按钮带的是 stage_id（URL 里塞不下中文），这条路以前 400「没有这个阶段」
+  const other = createProject(db, { title: "给 calc 加除法", repo: "repo", lane: "feature", owner: "bob" });
+  await meetProject(db, other.id, { repoFiles: [] });
+  for (const b of backlogOf(db, other.id).filter((x) => x.status === "open")) decideBacklog(db, other.id, b.id, { status: "next", by: "lead0" });
+  signStages(db, other.id, { group: "A", by: "lead0" });
+  const first = getProject(db, other.id).stages[0];
+  const byId = startStage(db, other.id, first.stage_id, { by: "alice" });
+  assert.equal(byId.task.stage_id, first.stage_id, "按 stage_id 也能开工（界面按钮走的就是这条）");
 });
 
 test("阶段闸门 stage_scope：改到边界外必须 FAIL 并点名文件", () => {

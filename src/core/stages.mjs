@@ -323,7 +323,10 @@ export function startStage(db, projectId, ref, { by = "system", budgetTokens = n
 
 export function findStage(project, ref) {
   const s = String(ref);
-  return project.stages.find((x) => String(x.seq) === s) || project.stages.find((x) => x.name === s) || null;
+  return project.stages.find((x) => String(x.seq) === s) ||
+    project.stages.find((x) => x.name === s) ||
+    // 界面上的按钮带的是 stage_id（s_xxx）：URL 里塞不下中文阶段名，别再让这条路 404。
+    project.stages.find((x) => x.stage_id === s) || null;
 }
 
 /** 发散项分流：next（下一阶段做）/ later（以后做）/ drop（不做）。 */
