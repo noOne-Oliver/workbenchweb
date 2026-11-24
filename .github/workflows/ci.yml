@@ -1,0 +1,72 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: 内核测试与确定性演示
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: 单元测试
+        run: npm test
+      - name: 阶段链演示（41 项断言）
+        run: npm run demo:stage
+      - name: 两段评审演示
+        run: npm run demo:review
+      - name: 护栏打回重试演示
+        run: npm run demo:retry
+
+  bundle-linux:
+    name: linux-x64 离线包
+    needs: test
+    runs-on: ubuntu-22.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: 组装
+        run: node scripts/bundle.mjs --target linux-x64
+      - name: 验收（真解包 / 真起服务 / 真跑任务 / 真收工）
+        run: node scripts/verify-bundle.mjs --target linux-x64
+      - uses: actions/upload-artifact@v4
+        with:
+          name: workbench-linux-x64
+          path: dist/workbench-linux-x64.tar.gz
+          retention-days: 7
+          compression-level: 0
+
+  bundle-darwin:
+    name: darwin-arm64 离线包
+    needs: test
+    runs-on: macos-14
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: 组装
+        run: node scripts/bundle.mjs --target darwin-arm64
+      - name: 验收
+        run: node scripts/verify-bundle.mjs --target darwin-arm64
+      - uses: actions/upload-artifact@v4
+        with:
+          name: workbench-darwin-arm64
+          path: dist/workbench-darwin-arm64.tar.gz
+          retention-days: 7
+          compression-level: 0

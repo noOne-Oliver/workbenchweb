@@ -83,7 +83,7 @@ function freshDb() {
   }
 }
 
-const TERMINAL = new Set(["awaiting_human", "blocked", "done"]);
+const TERMINAL = new Set(["awaiting_review", "awaiting_approval", "awaiting_human", "blocked", "done"]);
 
 function summarizeGuards(checks) {
   const failed = (checks || []).filter((c) => !c.ok);
@@ -126,7 +126,7 @@ function checkChain(db, taskId) {
   const problems = [];
   if (!caught) problems.push("没看到 no_tautological_test 失败（注入没落地，或模型没写数字断言）");
   if (caught && !passedAfter) problems.push("护栏打回之后没有出现通过的验证");
-  if (t.state !== "awaiting_human") problems.push("终态不是 awaiting_human，而是 " + t.state);
+  if (t.state !== "awaiting_review" && t.state !== "awaiting_human") problems.push("终态不是 awaiting_review（机器验证完、等人初筛），而是 " + t.state);
   if (t.attempts < 2) problems.push("attempts=" + t.attempts + "，没有发生重做");
   return { caught, passedAfter, task: t, problems };
 }
@@ -196,7 +196,7 @@ async function main() {
     process.stdout.write("[demo] 链路不成立：\n  - " + problems.join("\n  - ") + "\n");
     process.exit(2);
   }
-  process.stdout.write("[demo] 链路成立：FAIL → 打回 → 重置 → 重做 → 通过 → awaiting_human\n");
+  process.stdout.write("[demo] 链路成立：FAIL → 打回 → 重置 → 重做 → 通过 → awaiting_review（等人初筛）\n");
 }
 
 main().catch((e) => {

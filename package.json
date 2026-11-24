@@ -21,6 +21,7 @@
     "check": "node --test tests/*.test.mjs",
     "demo:reset": "node scripts/reset-demo.mjs",
     "demo:review": "node scripts/demo-review.mjs --fresh",
+    "demo:retry": "WB_FAULT=tautology WB_MOCK_SCENARIO=good node scripts/demo-retry.mjs --fresh",
     "demo:stage": "node scripts/demo-stage.mjs --fresh",
     "demo:real": "node scripts/demo-real-review.mjs --fresh",
     "bench:real": "node scripts/bench-real.mjs --fresh",
