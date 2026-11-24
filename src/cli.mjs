@@ -123,6 +123,72 @@ async function main() {
     }
     return;
   }
+  // ---- 项目 / 阶段链 ----------------
+  // 这条链路是"人只 review"的骨架：开会（机器）→ 签字（人，2 次）→ 开工（机器）→ 合（人，1 次）。
+  if (cmd === "project") {
+    const st = await import("./core/stages.mjs");
+    const sub = process.argv[3];
+    const id = arg("id", process.argv[4]);
+    if (sub === "new") {
+      const p = st.createProject(db, {
+        title: arg("title"), repo: arg("repo", "demo"), lane: arg("lane", "feature"),
+        owner: arg("owner", process.env.USER || "unknown"),
+        budgetTokens: Number(arg("budget", process.env.WB_BUDGET || 1_000_000)),
+      });
+      process.stdout.write(p.id + "\n");
+      return;
+    }
+    if (sub === "list" || !sub) {
+      for (const p of st.listProjects(db)) {
+        const done = p.stages.filter((s) => s.state === "done").length;
+        process.stdout.write([p.id, p.state.padEnd(9), p.lane.padEnd(8), done + "/" + p.stages.length + " 阶段", "backlog " + p.open_backlog, p.title].join("  ") + "\n");
+      }
+      return;
+    }
+    if (sub === "show") {
+      const p = st.getProject(db, id);
+      if (!p) { process.stdout.write("不存在: " + id + "\n"); return; }
+      process.stdout.write(p.title + "  [" + p.state + ", " + p.lane + "]\n" + (p.summary || "") + "\n");
+      for (const s of p.stages) {
+        process.stdout.write("  " + s.seq + ". " + s.name.padEnd(4) + " " + s.state.padEnd(9) + " 组" + s.signature_group +
+          "  产出[" + s.artifacts.join(",") + "]  边界[" + s.allowedGlobs.join(",") + "]  " + (s.task_id || "") + "\n");
+        process.stdout.write("     目标: " + s.goal + "\n");
+      }
+      for (const b of p.backlog) {
+        process.stdout.write("  backlog " + b.id + " [" + b.status + "] " + b.text + "\n");
+      }
+      return;
+    }
+    if (sub === "meet") {
+      let provider = null;
+      if (arg("engine")) {
+        process.env.WB_ENGINE = arg("engine");
+        if (arg("model")) process.env.WB_MODEL = arg("model");
+        provider = await getProvider(arg("engine"));
+      }
+      const p = await st.meetProject(db, id, { provider });
+      process.stdout.write("预备会开完（" + (p.summary || "") + "）\n");
+      for (const s of p.stages) process.stdout.write("  " + s.seq + ". " + s.name + " - " + s.goal + "\n");
+      return;
+    }
+    if (sub === "sign") {
+      const p = st.signStages(db, id, { group: arg("group", "A"), by: arg("by", process.env.USER || "lead"), note: arg("note") });
+      process.stdout.write("已签字（组 " + arg("group", "A") + "），项目状态 " + p.state + "\n");
+      return;
+    }
+    if (sub === "start") {
+      const out = st.startStage(db, id, process.argv[4], { by: arg("by", process.env.USER || "unknown"), budgetTokens: arg("budget") ? Number(arg("budget")) : null });
+      process.stdout.write("已开工: " + out.task.id + "（阶段 " + (out.stage && out.stage.name) + "）\n");
+      return;
+    }
+    if (sub === "backlog") {
+      const p = st.decideBacklog(db, arg("id", process.argv[4]), process.argv[5], { status: arg("decide"), by: arg("by", process.env.USER || "unknown") });
+      process.stdout.write("已分流，剩余 open: " + st.openBacklogCount(db, p.id) + "\n");
+      return;
+    }
+    process.stdout.write("用法: cli.mjs project <new|list|show|meet|sign|start|backlog>\n");
+    return;
+  }
   // 一条命令起整套：server + 看护着的 worker。
   // 外壳只 spawn 这一个进程，worker 崩了由这里的 supervise 拉起来 —— 人不用守着。
   if (cmd === "up") {
@@ -174,7 +240,7 @@ async function main() {
     startServer();
     return;
   }
-  process.stdout.write("用法: cli.mjs <init|workspace|cred|user|enqueue|status|rebuild|run|serve|up>\n");
+  process.stdout.write("用法: cli.mjs <init|workspace|cred|user|project|enqueue|status|rebuild|run|serve|up>\n");
 }
 
 main().catch((e) => { process.stderr.write(String(e && e.stack || e) + "\n"); process.exit(1); });

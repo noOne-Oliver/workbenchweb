@@ -1,6 +1,7 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { checkScope, matchesAny } from "../core/glob.mjs";
 import { sh } from "./worktree.mjs";
 
 /**
@@ -301,10 +302,60 @@ export function tautologyIn(actual, expected, fnName, callees) {
   return null;
 }
 
+/** 目录里所有文件（相对路径），跳过 .git/node_modules 这类噪音。 */
+function walkFiles(root, prefix = "", out = [], depth = 0) {
+  if (depth > 8) return out;
+  let entries = [];
+  try { entries = readdirSync(prefix ? join(root, prefix) : root, { withFileTypes: true }); } catch { return out; }
+  for (const e of entries) {
+    if (e.name === ".git" || e.name === "node_modules" || e.name === ".oc" || e.name === "dist") continue;
+    const rel = prefix ? prefix + "/" + e.name : e.name;
+    if (e.isDirectory()) walkFiles(root, rel, out, depth + 1);
+    else out.push(rel);
+  }
+  return out;
+}
+
+/** 阶段产出物是否真的存在：精确路径看文件，带通配的看是否有文件命中。 */
+export function artifactExists(workdir, artifact) {
+  const a = String(artifact || "").trim();
+  if (!a) return true;
+  if (!a.includes("*")) return existsSync(join(workdir, a));
+  return walkFiles(workdir).some((f) => matchesAny(f, [a]));
+}
+
 export function runGuards({ workdir, base, config, extra }) {
   const cfg = config || loadRepoConfig(workdir);
   const checks = [];
   const files = changedFiles(workdir, base);
+
+  // 0. 阶段闸门（只在任务挂了阶段时生效）：机械执行「这个阶段只做这件事」。
+  //    守的是"目标不发散"，不是代码质量——质量交给测试与 Verifier。
+  const stage = extra && extra.stage ? extra.stage : null;
+  if (stage) {
+    const globs = Array.isArray(stage.allowedGlobs) ? stage.allowedGlobs : [];
+    const scope = checkScope(files.map((f) => f.path), globs);
+    checks.push({
+      id: "stage_scope",
+      ok: scope.ok,
+      detail: scope.ok
+        ? "改动都在「" + stage.name + "」范围内" + (globs.length ? "（" + globs.slice(0, 6).join(" ") + (globs.length > 6 ? " …" : "") + "）" : "（本阶段不限制文件）")
+        : "越界改动：本阶段「" + stage.name + "」只允许 " + (globs.join(" ") || "（无）") + "，却改了 " +
+          scope.outside.slice(0, 8).join(", ") + (scope.outside.length > 8 ? " 等 " + scope.outside.length + " 个文件" : "") +
+          "。越界的想法请写进 backlog，不要在实现阶段顺手做。",
+    });
+    const artifacts = Array.isArray(stage.artifacts) ? stage.artifacts : [];
+    const missing = artifacts.filter((a) => !artifactExists(workdir, a));
+    checks.push({
+      id: "stage_artifacts",
+      ok: missing.length === 0,
+      detail: artifacts.length === 0
+        ? "本阶段不要求产出物"
+        : missing.length === 0
+          ? "本阶段产出物齐全：" + artifacts.join(", ")
+          : "本阶段产出物缺失：" + missing.join(", ") + "（要求 " + artifacts.join(", ") + "）",
+    });
+  }
 
   // 1. 测试必须真的跑，且真的绿（跑的是仓库整套测试，不是只跑新增那条）
   const { cmd, note } = testCommandFor(cfg);
@@ -458,6 +509,7 @@ export function runGuards({ workdir, base, config, extra }) {
     failed,
     checks,
     files,
+    stage: stage ? { id: stage.id, name: stage.name } : null,
     testOutput: String(run.out || "").slice(-12000),
     testCmd: cmd.join(" "),
     testDiff: testOutputTail(workdir, base),

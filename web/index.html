@@ -30,6 +30,24 @@
       <div class="row mono" id="ws-info"></div>
     </details>
   </section>
+  <section id="projects-panel">
+    <h2>项目 <span id="n-proj" class="pill">0</span>
+      <span class="hint">机器开预备会 → 人签 2 次字 → 后台按阶段跑；人只回答「目标对不对、边界够不够、要不要合」</span>
+      <button id="new-proj-btn" class="ghost" onclick="toggleNewProject()">＋ 新建项目</button>
+    </h2>
+    <form id="new-project" autocomplete="off" hidden>
+      <input id="p-title" placeholder="这个功能是什么（一句话说清目标）" size="42" required />
+      <input id="p-repo" placeholder="目标仓库路径" size="30" required />
+      <select id="p-lane" title="功能走闭门会议（4 阶段 / 签 2 次字）；杂活不开会（1 阶段 / 签 1 次字）">
+        <option value="feature">功能：开会 + 4 阶段</option>
+        <option value="chore">杂活：不开会 + 1 阶段</option>
+      </select>
+      <input id="p-budget" type="number" min="1000" step="1000" value="1000000" title="每个阶段任务的 token 预算" />
+      <button class="primary" type="submit">建项目</button>
+      <span id="proj-msg"></span>
+    </form>
+    <div id="projects" class="projects"></div>
+  </section>
   <main>
     <section id="queue" class="col">
       <h2>待处理 <span id="n-await" class="pill">0</span>

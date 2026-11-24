@@ -6,6 +6,8 @@ import { getProvider } from "./engine.mjs";
 import { sh, ensureWorktree, resetToBase, commitAll, diffStat, diffPatch, headSha, isGitRepo, statusPorcelain, newlyDirty, restorePaths } from "./worktree.mjs";
 import { loadRepoConfig, runGuards } from "./guards.mjs";
 import { classifySize, repoFileCount } from "../core/sizing.mjs";
+import { stageForTask, stageGateFor, completeStageForTask, addBacklog, advanceProject } from "../core/stages.mjs";
+import { agentForRole } from "../core/workflows.mjs";
 import * as sop from "./sop.mjs";
 import { resolve, join } from "node:path";
 import { mkdirSync, readFileSync } from "node:fs";
@@ -161,10 +163,45 @@ function scratchFor(id) {
  * 但省钱不能省质量：small 只在第一次尝试走快路径，一旦没过（attempts > 0）
  * 就自动降级成 normal，重试时拿到完整拆解。
  */
+/** 把阶段定义压成 coder 能读的方案：目标、边界、产出物、不做什么。 */
+function stagePlanMd(stage) {
+  const L = [];
+  L.push("## 这个阶段要做的事");
+  L.push(stage.goal);
+  L.push("");
+  L.push("## 边界（越界会被护栏打回）");
+  const globs = Array.isArray(stage.allowedGlobs) ? stage.allowedGlobs : [];
+  L.push(globs.length ? "只允许改这些路径：" + globs.join("、") : "本阶段不限制改动路径");
+  const artifacts = Array.isArray(stage.artifacts) ? stage.artifacts : [];
+  if (artifacts.length) L.push("必须产出这些文件：" + artifacts.join("、"));
+  const nonGoals = Array.isArray(stage.nonGoals) ? stage.nonGoals : [];
+  if (nonGoals.length) {
+    L.push("");
+    L.push("## 这个阶段明确不做");
+    for (const n of nonGoals) L.push("- " + n);
+  }
+  L.push("");
+  L.push("## 纪律");
+  L.push("只做上面这一件事。想到的其他改进不要顺手做，写进交付说明里的「遗留」即可——它们下次开会再决定。");
+  return L.join("\n");
+}
+
 async function doPlanning(db, id, ctx) {
   const t = getTask(db, id);
   const dir = scratchFor(id);
   const repoAbs = resolve(ROOT, t.repo);
+  const stage = stageForTask(db, t);
+
+  // 挂了阶段的任务不再"自由发挥"：这一阶段要做什么，会议里已经定死了（目标 + 产出物 + 边界）。
+  // 再让 lead 重新想一遍方案，等于每个阶段都重开一次会，也给了它悄悄改目标的余地。
+  if (stage) {
+    record(db, { taskId: id, type: "task.sized", actor: ctx.workerId, payload: { size: "normal", reason: "阶段任务：方案由阶段目标决定，不另起规划" } }, false);
+    addEvidence(db, id, { size: "normal", size_reason: "阶段任务：方案由阶段目标决定", stage: stage.stage_id, stage_name: stage.name }, "evidence.patch");
+    record(db, { taskId: id, type: "plan.produced", actor: ctx.workerId, payload: { plan_md: stagePlanMd(stage) } });
+    transition(db, id, "implementing", { actor: ctx.workerId, reason: "阶段「" + stage.name + "」目标已定，直接开工" });
+    return;
+  }
+
   const { size, reason } = classifySize(t, { repoFiles: repoFileCount(repoAbs) });
   record(db, { taskId: id, type: "task.sized", actor: ctx.workerId, payload: { size, reason, attempt: t.attempts } }, false);
   addEvidence(db, id, { size, size_reason: reason }, "evidence.patch");
@@ -244,6 +281,17 @@ async function doImplement(db, id, ctx) {
   const repo = resolve(ROOT, t.repo);
   if (!isGitRepo(repo)) throw new Error("目标不是 git 仓库: " + repo);
 
+  // 阶段任务必须由 startStage 正式开工（会记 stage.transition= running）。
+  // 直接改库或绕过接口塞进来的任务在这里被拦住——否则"没签字的阶段"能照跑，闸门形同虚设。
+  const stage = stageForTask(db, t);
+  if (stage && stage.state !== "running") {
+    transition(db, id, "blocked", {
+      actor: ctx.workerId,
+      reason: "阶段「" + stage.name + "」当前是 " + stage.state + "，还没签字/开工，不能动手",
+    });
+    return;
+  }
+
   if (t.attempts >= MAX_ATTEMPTS) {
     transition(db, id, "blocked", { actor: ctx.workerId, reason: "max attempts reached" });
     return;
@@ -291,8 +339,10 @@ async function doImplement(db, id, ctx) {
   // 一个字都不碰，但 coder 越界写的东西必须原样退回，否则整轮验证白做。
   const repoBefore = statusPorcelain(repo);
 
+  // 设计/契约阶段由 architect 视角的 agent 干，实现阶段才是 coder。
+  // 同一个 provider，换的是"这个人现在是谁"——角色先于模型。
   await callAgent(db, id, { ...ctx, cwd: dir }, {
-    role: "coder",
+    role: agentForRole(stage ? stage.role : "coder"),
     prompt: sop.coderPrompt(t, t.plan_md || "", attempt, retryFeedback(t, db)),
     attempt,
   });
@@ -327,8 +377,25 @@ async function doVerify(db, id, ctx) {
   }
 
   const cfg = loadRepoConfig(dir);
-  const guards = runGuards({ workdir: dir, base, config: cfg });
+  const stage = stageForTask(db, t);
+  // 阶段闸门交给确定性护栏判：越界改动 / 产出物缺失都算 FAIL，不靠 Verifier 自觉。
+  const guards = runGuards({ workdir: dir, base, config: cfg, extra: stage ? { stage: stageGateFor(stage) } : {} });
   const diff = diffPatch(dir, base, 20000);
+
+  // 越界的想法不丢：落进 backlog，等这一阶段签字时由人分流。
+  // 直接丢掉的话，agent 下次还会"顺手做"，人也没机会说"这个以后做"。
+  const scopeCheck = (guards.checks || []).find((c) => c.id === "stage_scope");
+  if (stage && scopeCheck && !scopeCheck.ok) {
+    try {
+      const outside = (guards.files || []).map((f) => f.path);
+      addBacklog(db, stage.project_id, {
+        text: "「" + stage.name + "」阶段改了边界外的文件：" + outside.slice(0, 6).join(", ") + "（需要决定是扩边界还是留到下一阶段）",
+        stageId: stage.stage_id,
+        source: "guard",
+        by: "stage_scope",
+      });
+    } catch { /* backlog 写不进去不该连带把验证搞挂 */ }
+  }
 
   const res = await callAgent(db, id, { ...ctx, cwd: dir }, {
     role: "verifier",
@@ -429,6 +496,13 @@ async function doMerge(db, id, ctx) {
   }
   record(db, { taskId: id, type: "merge.done", actor: ctx.workerId, payload: { sha: headSha(repo) } });
   transition(db, id, "done", { actor: ctx.workerId, reason: "merged" });
+
+  // 阶段的任务合进去了 = 这个阶段的交付物进了主干，阶段收工，项目自动判下一步。
+  // 阶段完成是账本里的机械动作，不需要人再点一次"完成"。
+  try {
+    completeStageForTask(db, getTask(db, id), { by: ctx.workerId });
+    advanceProject(db, getTask(db, id).project_id, { by: ctx.workerId });
+  } catch { /* 非阶段任务：没有 project_id，忽略 */ }
 }
 
 /** 主泵：认领 -> 跑到暂停点 -> 释放租约。可被 kill -9，重启后从状态机续跑。 */

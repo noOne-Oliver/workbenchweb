@@ -70,6 +70,15 @@ function describe(e) {
     case "review.passed": return ["初筛通过", p.by + (p.waived ? "（lead 直接终审，记 waived）" : "") + (p.note ? "：" + p.note : "")];
     case "review.changes_requested": return ["打回", p.by + "（" + (p.stage === "awaiting_review" ? "初筛" : "终审") + "）" + (p.note ? "：" + p.note : "")];
     case "merge.done": return ["合并", String(p.sha || "").slice(0, 7)];
+    case "project.created": return ["建项目", p.title + "（" + (p.lane === "chore" ? "杂活：不开会" : "功能：要开会") + "）"];
+    case "project.meeting": return ["预备会", "拆成 " + ((p.stages && p.stages.length) || "?") + " 个阶段 · 你只需 2 次签字 · 约 " + (p.human_minutes || "?") + " 分钟"];
+    case "project.transition": return ["项目", (PROJ_LABEL[p.from] || p.from) + " → " + (PROJ_LABEL[p.to] || p.to)];
+    case "stage.transition": return ["阶段", (p.name || "?") + "：" + (STAGE_LABEL[p.from] || p.from) + " → " + (STAGE_LABEL[p.to] || p.to) + (p.reason ? "（" + p.reason + "）" : "")];
+    case "stage.assigned": return ["阶段开工", "阶段挂了任务 " + String(p.task_id || "").slice(0, 14)];
+    case "stage.signed": return ["签字", p.group + " 组（" + ((p.covers && p.covers.join("+")) || "?") + "）· " + (p.by || "") + (p.note ? "：" + p.note : "")];
+    case "backlog.added": return ["发散项", String(p.text || "").slice(0, 90)];
+    case "backlog.decided": return ["分流", String(p.status || "") + (p.by ? " · " + p.by : "")];
+    case "task.scoped": return ["挂阶段", "任务被限定在一个阶段的边界内"];
     case "lease.acquired": return ["租约", "被 " + (p.owner || "?") + " 认领"];
     case "lease.released": return ["租约", "释放"];
     case "lease.lost": return ["租约", "丢失，被别的 worker 接手"];
@@ -279,6 +288,7 @@ function card(t, actionable) {
       "<span>预算 " + fmt(t.spent_tokens) + "/" + fmt(t.budget_tokens) + "</span>" +
       (t.review_seconds != null ? "<span>初筛 " + t.review_seconds + "s</span>" : "") +
     "</div>" +
+    (t.stage_id ? '<div class="row"><span class="badge">' + esc(stageTag(t)) + "</span></div>" : "") +
     liveLine(t) +
     (t.diff_stat ? '<div class="row mono">' + esc(t.diff_stat) + "</div>" : "") +
     (v.verdict ? '<div class="row">Verifier: <span class="badge ' + (v.passed ? "ok" : "bad") + '">' + esc(v.verdict.summary || "") + "</span></div>" : "") +
@@ -291,6 +301,14 @@ function card(t, actionable) {
     (actionable ? reviewActions(t) : "") +
     (actionable ? "" : "") +
     "</div>";
+}
+
+/** 任务卡上的「属于哪个项目的哪个阶段」——否则阶段链跑起来后，卡片看不出彼此的关系。 */
+function stageTag(t) {
+  const p = projects.find((x) => x.id === t.project_id);
+  const s = p && (p.stages || []).find((x) => x.stage_id === t.stage_id);
+  if (!p || !s) return "阶段任务";
+  return "项目 " + p.title + " · 阶段 " + s.seq + " " + s.name;
 }
 
 const AWAITING = new Set(["awaiting_review", "awaiting_approval", "awaiting_human"]);
@@ -405,6 +423,8 @@ async function loadWorkspace() {
     }
     const repo = el("t-repo");
     if (repo && !repo.value) repo.value = w.starterRepo;
+    const prepo = el("p-repo");
+    if (prepo && !prepo.value) prepo.value = w.starterRepo;
 
     // 身份以服务端为准：右上角显示「谁 + 什么角色」，按钮由角色决定。
     if (w.me) { ME = w.me.name || ""; ROLE = w.me.role || "viewer"; }
@@ -544,9 +564,227 @@ async function loadHealth() {
   }
 }
 
+
+// ---- 项目 / 阶段链 ------------------------------------------------
+// 这一块是整个产品的"人只做三次决定"的落点：
+//   开会（机器开，人不在场）-> 签 A 组（设计+契约）-> 签 B 组（实现+合并）。
+// 每个阶段有目标、产出物、边界（allowedGlobs）、不管什么（nonGoals）、以及配的专家 agent，
+// 阶段闸门在护栏里机械执行"不许发散"，越界就 FAIL 并把想法丢进 backlog 等人分流。
+let projects = [];
+const PROJ_LABEL = { drafting: "待开会", proposed: "待签字", running: "进行中", done: "已交付" };
+const STAGE_LABEL = { proposed: "待签", approved: "已签", running: "在跑", done: "已交付", blocked: "卡住" };
+const STAGE_CLS = { proposed: "wait", approved: "ok", running: "run", done: "done", blocked: "bad" };
+const LANE_LABEL = { feature: "功能", chore: "杂活" };
+
+function stageChip(p, s) {
+  const cur = s.state === "running" || (p.state === "running" && s.state === "approved");
+  const tip = "阶段 " + s.seq + " · " + s.name + " · " + (STAGE_LABEL[s.state] || s.state) +
+    (s.task_id ? " · 任务 " + s.task_id : "");
+  return '<span class="stg st-' + (STAGE_CLS[s.state] || "wait") + (cur ? " cur" : "") + '" title="' + esc(tip) + '">' +
+    s.seq + " " + esc(s.name) + "</span>";
+}
+
+/** 两次签字：A=[设计,契约] B=[实现,合并] —— 组由 workflow 决定，前端不写死。 */
+function signatureGroups(p) {
+  const out = [];
+  for (const s of p.stages) {
+    let g = out.find((x) => x.group === s.signature_group);
+    if (!g) { g = { group: s.signature_group, names: [], signed: null, stages: [] }; out.push(g); }
+    g.names.push(s.name);
+    g.stages.push(s);
+  }
+  for (const g of out) g.signed = (p.signatures || []).find((x) => x.group_name === g.group) || null;
+  return out;
+}
+
+function stageDetail(p, s) {
+  const ev = (s.evidence) || {};
+  const bits = [];
+  bits.push('<div class="sg"><b>' + s.seq + " " + esc(s.name) + "</b>" +
+    '<span class="badge ' + (STAGE_CLS[s.state] === "bad" ? "bad" : "") + '">' + esc(STAGE_LABEL[s.state] || s.state) + "</span>" +
+    '<span class="dim">专家 ' + esc(s.agent || "?") + " · skill " + esc(s.skill || "?") + " · 角色 " + esc(s.role || "?") + "</span></div>");
+  bits.push('<div class="goal">' + esc(s.goal) + "</div>");
+  bits.push('<div class="row mono dim">产出物 ' + (s.artifacts.length ? esc(s.artifacts.join("、")) : "（无，交付物就是 diff + 测试）") + "</div>");
+  bits.push('<div class="row mono dim">边界 ' + (s.allowedGlobs.length ? esc(s.allowedGlobs.join("、")) : "不限制") + "</div>");
+  if (s.nonGoals && s.nonGoals.length) bits.push('<div class="row mono dim">不做 ' + esc(s.nonGoals.join("、")) + "</div>");
+  if (s.task_id) bits.push('<div class="row dim">任务 <span class="mono">' + esc(s.task_id) + "</span></div>");
+  return '<div class="stage">' + bits.join("") + "</div>";
+}
+
+function backlogBlock(p) {
+  const open = (p.backlog || []).filter((b) => b.status === "open");
+  const decided = (p.backlog || []).filter((b) => b.status !== "open");
+  if (!open.length && !decided.length) return "";
+  const DEC = { next: "下一阶段做", later: "以后做", drop: "不做" };
+  const rows = open.map((b) =>
+    '<li class="bl open"><span class="txt">' + esc(b.text) + '</span><span class="dim">（' + esc(b.source) + "）</span>" +
+    '<span class="acts">' + Object.keys(DEC).map((k) =>
+      '<button class="ghost" onclick="decideBacklog(\'' + p.id + "','" + b.id + "','" + k + '\')">' + DEC[k] + "</button>").join("") +
+    "</span></li>").join("");
+  const done = decided.map((b) =>
+    '<li class="bl done"><span class="txt">' + esc(b.text) + '</span><span class="dim">→ ' + esc(DEC[b.status] || b.status) +
+    (b.decided_by ? " · " + esc(b.decided_by) : "") + "</span></li>").join("");
+  return '<div class="backlog"><div class="row"><b>发散项</b>' +
+    (open.length ? '<span class="badge bad">' + open.length + " 条待分流（签字前必须分掉）</span>" : '<span class="badge ok">全部已分流</span>') +
+    "</div><ul>" + rows + done + "</ul></div>";
+}
+
+function gatesBlock(p) {
+  const groups = signatureGroups(p);
+  const out = [];
+  const lead = isLead();
+  for (const g of groups) {
+    if (g.signed) {
+      out.push('<div class="row dim">已签 ' + esc(g.group) + " 组（" + esc(g.names.join("+")) + "）· " +
+        esc(g.signed.by) + (g.signed.note ? "：" + esc(g.signed.note) : "") + "</div>");
+      continue;
+    }
+    const notDelivered = g.stages.some((s) => s.state !== "approved" && s.state !== "done" && s.state !== "running");
+    const label = "签 " + g.group + " 组（" + g.names.join(" + ") + "）";
+    out.push('<div class="row">' +
+      (lead
+        ? '<button class="primary" onclick="signGroup(\'' + p.id + "','" + g.group + '\')">' + esc(label) + "</button>"
+        : '<button class="primary" disabled title="只有 lead 能签字">' + esc(label) + "</button>") +
+      '<span class="dim">签完 ' + esc(g.names.join("、")) + ' 才能开工' +
+      (notDelivered ? "；但前一批要先交付（签字要基于交付物，不是预告）" : "") + "</span></div>");
+  }
+  return out.join("");
+}
+
+function startBlock(p) {
+  const out = [];
+  for (const s of p.stages) {
+    if (s.state !== "approved" || s.task_id) continue;
+    const behind = p.stages.filter((x) => x.seq < s.seq && x.state !== "done");
+    if (behind.length) {
+      out.push('<div class="row dim">' + s.seq + " " + esc(s.name) + "：等 " + esc(behind.map((x) => x.name).join("、")) + " 交付完</div>");
+      continue;
+    }
+    out.push('<div class="row"><button class="ghost" onclick="startStage(\'' + p.id + "','" + s.stage_id + '\')">开工 ' +
+      esc(s.seq + " " + s.name) + '（后台自动跑这个阶段）</button></div>');
+  }
+  return out.join("");
+}
+
+function projCard(p) {
+  const stages = p.stages || [];
+  const groups = signatureGroups(p);
+  const open = (p.backlog || []).filter((b) => b.status === "open").length;
+  const nextGate = groups.find((g) => !g.signed);
+  return '<div class="proj">' +
+    '<div class="phead"><b>' + esc(p.title) + "</b>" +
+      '<span class="badge ' + (p.state === "done" ? "ok" : p.state === "running" ? "" : "wait") + '">' + esc(PROJ_LABEL[p.state] || p.state) + "</span>" +
+      '<span class="dim">' + esc(LANE_LABEL[p.lane] || p.lane) + " · 提交 " + esc(p.owner) + " · 每阶段预算 " + fmt(p.budget_tokens) + "</span>" +
+      (p.human_minutes ? '<span class="dim">预计占用你 ' + p.human_minutes + " 分钟</span>" : "") +
+      (open ? '<span class="badge bad">' + open + " 条待分流</span>" : "") +
+    "</div>" +
+    (stages.length
+      ? '<div class="bar">' + stages.map((s) => stageChip(p, s)).join('<span class="sep">›</span>') + "</div>"
+      : '<div class="row dim">还没开会：点「开预备会」，机器 30 秒内出一份提案（阶段链 + 要你拍板的发散项）</div>') +
+    (p.summary ? '<div class="row dim">' + esc(p.summary) + "</div>" : "") +
+    (stages.length ? '<div class="row dim">签字 ' + (p.signatures || []).length + "/" + groups.length + " 次" +
+      (nextGate ? " · 下一步：签 " + esc(nextGate.group) + " 组（" + esc(nextGate.names.join("+")) + "）" : "") + "</div>" : "") +
+    (stages.length ? '<details class="pbody"><summary>展开：每个阶段的目标 / 产出物 / 边界 / 专家</summary>' +
+      stages.map((s) => stageDetail(p, s)).join("") + "</details>" : "") +
+    backlogBlock(p) +
+    (p.state === "drafting" ? '<div class="row"><button class="primary" onclick="meetProject(\'' + p.id + '\')">开预备会（机器先开会，人之后再来看）</button></div>' : "") +
+    (p.state !== "done" ? gatesBlock(p) + startBlock(p) : "") +
+    "</div>";
+}
+
+function renderProjects() {
+  const box = el("projects");
+  if (!box) return;
+  const active = projects.filter((p) => p.state !== "done");
+  const done = projects.filter((p) => p.state === "done");
+  const html = active.map(projCard).join("") +
+    (done.length ? '<details class="pdone"><summary>已交付的项目 ' + done.length + " 个</summary>" + done.map(projCard).join("") + "</details>" : "");
+  box.innerHTML = html || '<div class="empty">还没有项目。功能类工作从这里开：机器先开预备会，你只需要签 2 次字。</div>';
+  el("n-proj").textContent = active.length;
+}
+
+async function loadProjects() {
+  try {
+    const r = await api("/api/projects");
+    if (!r.ok) return;
+    const list = (await r.json()).projects || [];
+    // 列表接口不带 backlog/signatures，展开要用的完整数据单独取（项目数量很少）。
+    projects = await Promise.all(list.map(async (p) => {
+      try {
+        const d = await api("/api/projects/" + encodeURIComponent(p.id));
+        if (!d.ok) return p;
+        return (await d.json()).project || p;
+      } catch { return p; }
+    }));
+    renderProjects();
+  } catch { /* 老内核没有这些接口：这一块留空即可 */ }
+}
+
+window.toggleNewProject = function () {
+  const f = el("new-project");
+  if (f) f.hidden = !f.hidden;
+};
+
+window.meetProject = async function (id) {
+  const r = await api("/api/projects/" + id + "/meeting", { method: "POST", body: JSON.stringify({}) });
+  const j = await r.json();
+  if (!r.ok) { alert(j.error || "开会失败"); return; }
+  await loadProjects();
+  await loadFeed();
+};
+
+window.signGroup = async function (id, group) {
+  const note = prompt("签 " + group + " 组：写一句你认可什么（会进账本，事后可追溯）") ;
+  if (note === null) return;
+  const r = await api("/api/projects/" + id + "/sign", { method: "POST", body: JSON.stringify({ group, note }) });
+  const j = await r.json();
+  if (!r.ok) { alert(j.error || "签字失败"); return; }
+  await loadProjects();
+  await loadFeed();
+};
+
+window.startStage = async function (id, ref) {
+  const r = await api("/api/projects/" + id + "/stages/" + encodeURIComponent(ref) + "/start", { method: "POST", body: JSON.stringify({}) });
+  const j = await r.json();
+  if (!r.ok) { alert(j.error || "开工失败"); return; }
+  await loadProjects();
+  await load();
+  await loadFeed();
+};
+
+window.decideBacklog = async function (id, bid, status) {
+  const r = await api("/api/projects/" + id + "/backlog/" + bid, { method: "POST", body: JSON.stringify({ status }) });
+  const j = await r.json();
+  if (!r.ok) { alert(j.error || "分流失败"); return; }
+  await loadProjects();
+  await loadFeed();
+};
+
+const projForm = el("new-project");
+if (projForm) {
+  projForm.addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    const body = {
+      title: el("p-title").value.trim(),
+      repo: el("p-repo").value.trim(),
+      lane: el("p-lane").value,
+      budgetTokens: Number(el("p-budget").value || 1000000),
+    };
+    const r = await api("/api/projects", { method: "POST", body: JSON.stringify(body) });
+    const j = await r.json();
+    if (!r.ok) { alert(j.error || "建项目失败"); return; }
+    el("p-title").value = "";
+    el("proj-msg").textContent = "已建 " + j.project.id + " · 先开预备会，人只签 2 次字";
+    setTimeout(() => { el("proj-msg").textContent = ""; }, 8000);
+    await loadProjects();
+    await loadFeed();
+  });
+}
+
 loadWorkspace();
+loadProjects();
 load();
 loadFeed();
 loadHealth();
-setInterval(() => { load(); loadFeed(); }, 2500);
+setInterval(() => { load(); loadFeed(); loadProjects(); }, 2500);
 setInterval(loadHealth, 4000);

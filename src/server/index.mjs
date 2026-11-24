@@ -10,6 +10,10 @@ import { readHeartbeat } from "../core/liveness.mjs";
 import { codeVersion } from "../runner/worker.mjs";
 import { can } from "../core/permissions.mjs";
 import {
+  createProject, getProject, listProjects, meetProject, signStages, startStage, decideBacklog, eventsOfProject,
+} from "../core/stages.mjs";
+import { getProvider } from "../runner/engine.mjs";
+import {
   ROLES, authEnabled, createUser, ensureBootstrapAdmin, ensureLegacyOwners, getUser, listUsers,
   openSecret, publicUser, sessionUser, setActive, setPassword, setRole, signSession, tempPassword, verifyPassword,
 } from "../core/users.mjs";
@@ -254,6 +258,84 @@ export function createApp(db) {
         record(db, { taskId: t.id, type: "task.submitted", actor: me ? me.name : "unknown", payload: { role: me ? me.role : null } });
         return json(res, 201, { task: getTask(db, t.id) });
       }
+      // ---- 项目 / 阶段链：开会 → 签字 → 开工 → 分流 ----------------
+      // 这几条接口就是"人只做 3 次决定"的落点：目标对不对、边界够不够、要不要合。
+      if (req.method === "GET" && path === "/api/projects") {
+        return json(res, 200, { projects: listProjects(db) });
+      }
+      if (req.method === "POST" && path === "/api/projects") {
+        const c = can(me, "create_project");
+        if (!c.ok) return json(res, 403, { error: c.error });
+        const b = await readBody(req);
+        if (!b.title || !b.repo) return json(res, 400, { error: "title 与 repo 必填" });
+        try {
+          const p = createProject(db, {
+            title: b.title, repo: b.repo, lane: b.lane,
+            owner: me ? me.name : "unknown",
+            budgetTokens: Number(b.budgetTokens || process.env.WB_BUDGET || 1_000_000),
+            meetingBudget: Number(b.meetingBudget || 0),
+          });
+          return json(res, 201, { project: getProject(db, p.id) });
+        } catch (e) { return json(res, 400, { error: String(e.message || e) }); }
+      }
+      const pm = path.match(/^\/api\/projects\/([^/]+)$/);
+      if (req.method === "GET" && pm) {
+        const p = getProject(db, pm[1]);
+        if (!p) return json(res, 404, { error: "not found" });
+        return json(res, 200, { project: p, events: eventsOfProject(db, p.id) });
+      }
+
+      // 预备会：机器先开，人之后再来看。默认走确定性模板（不烧 token）；
+      // 配了真引擎才让 lead 参与改写目标 —— 开会本身也应该是可选的。
+      const pmeet = path.match(/^\/api\/projects\/([^/]+)\/meeting$/);
+      if (req.method === "POST" && pmeet) {
+        const c = can(me, "meet_project");
+        if (!c.ok) return json(res, 403, { error: c.error });
+        let provider = null;
+        if (String(process.env.WB_MEETING_ENGINE || "").length) {
+          try { provider = getProvider(); } catch { provider = null; }
+        }
+        try {
+          const p = await meetProject(db, pmeet[1], { provider });
+          return json(res, 200, { project: p });
+        } catch (e) { return json(res, 400, { error: String(e.message || e) }); }
+      }
+
+      const psign = path.match(/^\/api\/projects\/([^/]+)\/sign$/);
+      if (req.method === "POST" && psign) {
+        const c = can(me, "sign_stage");
+        if (!c.ok) return json(res, 403, { error: c.error });
+        const b = await readBody(req);
+        try {
+          const p = signStages(db, psign[1], { group: String(b.group || ""), by: me.name, role: me.role, note: b.note || null });
+          return json(res, 200, { project: p });
+        } catch (e) { return json(res, 400, { error: String(e.message || e) }); }
+      }
+
+      const pstart = path.match(/^\/api\/projects\/([^/]+)\/stages\/([^/]+)\/start$/);
+      if (req.method === "POST" && pstart) {
+        const c = can(me, "start_stage");
+        if (!c.ok) return json(res, 403, { error: c.error });
+        const b = await readBody(req);
+        try {
+          const out = startStage(db, pstart[1], decodeURIComponent(pstart[2]), {
+            by: me.name, budgetTokens: b.budgetTokens ? Number(b.budgetTokens) : null,
+          });
+          return json(res, 201, { task: out.task, project: getProject(db, pstart[1]) });
+        } catch (e) { return json(res, 400, { error: String(e.message || e) }); }
+      }
+
+      const pbl = path.match(/^\/api\/projects\/([^/]+)\/backlog\/([^/]+)$/);
+      if (req.method === "POST" && pbl) {
+        const c = can(me, "decide_backlog");
+        if (!c.ok) return json(res, 403, { error: c.error });
+        const b = await readBody(req);
+        try {
+          const p = decideBacklog(db, pbl[1], pbl[2], { status: String(b.status || ""), by: me.name, note: b.note || null });
+          return json(res, 200, { project: p });
+        } catch (e) { return json(res, 400, { error: String(e.message || e) }); }
+      }
+
       const m = path.match(/^\/api\/tasks\/([^/]+)$/);
       if (req.method === "GET" && m) {
         const t = getTask(db, m[1]);

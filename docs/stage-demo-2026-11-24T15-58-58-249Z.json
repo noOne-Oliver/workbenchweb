@@ -1,0 +1,163 @@
+{
+  "at": "2026-11-24T15:58:58.249Z",
+  "workspace": "/Users/liujie/Deepseek/.demo/stage-ws",
+  "seconds": 5,
+  "checks": [
+    {
+      "check": "预备会拆出 4 个阶段",
+      "ok": true,
+      "extra": "设计/契约/实现/合并"
+    },
+    {
+      "check": "签字只需要 2 次（A=设计+契约，B=实现+合并）",
+      "ok": true,
+      "extra": ""
+    },
+    {
+      "check": "预备会产出了要人拍板的发散项",
+      "ok": true,
+      "extra": "目标只有一句话：要不要在契约阶段把验收标准写成清单？不写的话只能按「测试通过」验收。"
+    },
+    {
+      "check": "人不需要坐在会里（估算分钟数 <= 10）",
+      "ok": true,
+      "extra": "7"
+    },
+    {
+      "check": "B 组在前序阶段没交付时签不了",
+      "ok": true,
+      "extra": "先让 「设计」、「契约」 交付完再签这一批：签字要基于交付物，不是预告"
+    },
+    {
+      "check": "没签字的阶段开不了工",
+      "ok": true,
+      "extra": "阶段「设计」还没签字（当前 proposed）：先签 A 组"
+    },
+    {
+      "check": "还有发散项没分流时签不了字",
+      "ok": true,
+      "extra": "还有 1 条发散项没分流（签字的同时把它们分流掉）：b_mwuvqgrl518y1 目标只有一句话：要不要在契约阶段把验"
+    },
+    {
+      "check": "分流后没有遗留发散项",
+      "ok": true,
+      "extra": "1"
+    },
+    {
+      "check": "A 组签完，设计/契约变 approved",
+      "ok": true,
+      "extra": ""
+    },
+    {
+      "check": "项目进入 running",
+      "ok": true,
+      "extra": ""
+    },
+    {
+      "check": "签完不许重开预备会改目标（要改走复议会）",
+      "ok": true,
+      "extra": "已经有阶段开工或签字了：要改目标请走复议会（这会攒证据），不要重开预备会"
+    },
+    {
+      "check": "设计阶段任务跑到 done",
+      "ok": true,
+      "extra": "done"
+    },
+    {
+      "check": "阶段闸门在护栏里生效（stage_scope 通过）",
+      "ok": true,
+      "extra": ""
+    },
+    {
+      "check": "产出物检查也在护栏里（stage_artifacts 通过）",
+      "ok": true,
+      "extra": ""
+    },
+    {
+      "check": "设计稿真的落进了主干",
+      "ok": true,
+      "extra": ""
+    },
+    {
+      "check": "阶段完成后状态为 done",
+      "ok": true,
+      "extra": "done"
+    },
+    {
+      "check": "契约阶段 done",
+      "ok": true,
+      "extra": "done"
+    },
+    {
+      "check": "契约文档落盘",
+      "ok": true,
+      "extra": ""
+    },
+    {
+      "check": "B 组签完，实现/合并变 approved",
+      "ok": true,
+      "extra": ""
+    },
+    {
+      "check": "整个功能只签了 2 次字",
+      "ok": true,
+      "extra": "2"
+    },
+    {
+      "check": "实现阶段 done",
+      "ok": true,
+      "extra": "done"
+    },
+    {
+      "check": "实现阶段护栏全绿（含阶段闸门）",
+      "ok": true,
+      "extra": ""
+    },
+    {
+      "check": "乘法除法真的进了主干",
+      "ok": true,
+      "extra": ""
+    },
+    {
+      "check": "合并阶段 done",
+      "ok": true,
+      "extra": "done"
+    },
+    {
+      "check": "项目自动推进到 done（不需要人再点完成）",
+      "ok": true,
+      "extra": "done"
+    },
+    {
+      "check": "越界改动被 stage_scope 抓住",
+      "ok": true,
+      "extra": "越界改动：本阶段「设计」只允许 docs/** *.md，却改了 src/calc.mjs。越界的想法请写进 backlog，不要在实现阶段顺手做。"
+    },
+    {
+      "check": "任务没有直接合进主干",
+      "ok": true,
+      "extra": "blocked"
+    },
+    {
+      "check": "越界的想法落进 backlog，等人分流",
+      "ok": true,
+      "extra": "「设计」阶段改了边界外的文件：src/calc.mjs（需要决定是扩边界还是留到下一阶段）"
+    },
+    {
+      "check": "杂活只有 1 个阶段",
+      "ok": true,
+      "extra": "实现"
+    },
+    {
+      "check": "杂活签 1 次就能开工",
+      "ok": true,
+      "extra": ""
+    },
+    {
+      "check": "杂活估算人只需要 1 分钟",
+      "ok": true,
+      "extra": "1"
+    }
+  ],
+  "failed": []
+}

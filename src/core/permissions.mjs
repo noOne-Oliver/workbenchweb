@@ -62,6 +62,21 @@ export function can(user, action, task = null) {
       return { ok: false, error: "只能取消自己提交的任务" };
     }
 
+    case "create_project":
+    case "meet_project":
+    case "decide_backlog":
+      return { ok: true };
+
+    case "start_stage": {
+      if (!task) return { ok: true };
+      return { ok: true };
+    }
+
+    // 签字 = 为「这一组阶段的目标与边界」背书，且默认不改内容。
+    // 只有 lead 能签：成员可以提意见（backlog / 打回），但背书责任不在成员身上。
+    case "sign_stage":
+      return lead ? { ok: true } : { ok: false, error: "只有 lead 能给阶段签字（成员可以提 backlog 或打回）" };
+
     case "set_budget":
     case "manage_users":
       return lead ? { ok: true } : { ok: false, error: "只有 lead 可以" + (action === "set_budget" ? "改预算" : "管理成员") };

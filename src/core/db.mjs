@@ -69,6 +69,73 @@ function migrate(db) {
     );
   `);
 
+  // 阶段链：项目 -> 阶段 -> 任务。项目和阶段是账本里的对象，不是界面上的标签，
+  // 这样「这一批改动属于哪个目标、边界在哪」可以重放、可以审计。
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS projects (
+      id              TEXT PRIMARY KEY,
+      title           TEXT NOT NULL,
+      repo            TEXT NOT NULL,
+      lane            TEXT NOT NULL DEFAULT 'feature',
+      workflow        TEXT NOT NULL,
+      owner           TEXT NOT NULL,
+      state           TEXT NOT NULL DEFAULT 'drafting',
+      budget_tokens   INTEGER NOT NULL DEFAULT 1000000,
+      meeting_budget  INTEGER NOT NULL DEFAULT 0,
+      summary         TEXT,
+      human_minutes   INTEGER,
+      created_at      TEXT NOT NULL,
+      updated_at      TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS stages (
+      stage_id        TEXT PRIMARY KEY,
+      project_id      TEXT NOT NULL,
+      seq             INTEGER NOT NULL,
+      name            TEXT NOT NULL,
+      goal            TEXT NOT NULL,
+      role            TEXT NOT NULL,
+      skill           TEXT,
+      artifacts       TEXT NOT NULL DEFAULT '[]',
+      allowed_globs   TEXT NOT NULL DEFAULT '[]',
+      non_goals       TEXT NOT NULL DEFAULT '[]',
+      state           TEXT NOT NULL DEFAULT 'proposed',
+      signature_group TEXT NOT NULL DEFAULT 'A',
+      task_id         TEXT,
+      contract_md     TEXT,
+      started_at      TEXT,
+      ended_at        TEXT,
+      created_at      TEXT NOT NULL,
+      updated_at      TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_stages_project ON stages(project_id, seq);
+
+    CREATE TABLE IF NOT EXISTS backlog (
+      id          TEXT PRIMARY KEY,
+      project_id  TEXT NOT NULL,
+      stage_id    TEXT,
+      text        TEXT NOT NULL,
+      source      TEXT NOT NULL DEFAULT 'agent',
+      status      TEXT NOT NULL DEFAULT 'open',
+      decided_by  TEXT,
+      decided_at  TEXT,
+      created_at  TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS signatures (
+      id          INTEGER PRIMARY KEY AUTOINCREMENT,
+      project_id  TEXT NOT NULL,
+      group_name  TEXT NOT NULL,
+      covers      TEXT NOT NULL,
+      by          TEXT,
+      note        TEXT,
+      created_at  TEXT NOT NULL
+    );
+  `);
+
+  addColumn(db, "tasks", "project_id", "TEXT");
+  addColumn(db, "tasks", "stage_id", "TEXT");
+
   // 两段评审（初筛 / 终审）新增的列。老库直接 ALTER，新库在这里补齐。
   addColumn(db, "tasks", "reviewer", "TEXT");
   addColumn(db, "tasks", "review_lease_expires_at", "INTEGER");
