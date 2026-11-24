@@ -10,8 +10,11 @@ import { readHeartbeat } from "../core/liveness.mjs";
 import { codeVersion } from "../runner/worker.mjs";
 import { can } from "../core/permissions.mjs";
 import {
-  createProject, getProject, listProjects, meetProject, signStages, startStage, decideBacklog, eventsOfProject,
+  createProject, getProject, listProjects, meetProject, signStages, startStage, decideBacklog, eventsOfProject, assignStageOwner,
 } from "../core/stages.mjs";
+import { addMemory, memoryOf, MEMORY_KINDS } from "../core/memory.mjs";
+import { decisionsOf, openDecision, resolveDecision, TRIGGERS } from "../core/meetings.mjs";
+import { assetsOf, decideAssets, listAssets } from "../core/retro.mjs";
 import { getProvider } from "../runner/engine.mjs";
 import {
   ROLES, authEnabled, createUser, ensureBootstrapAdmin, ensureLegacyOwners, getUser, listUsers,
@@ -120,7 +123,9 @@ export function createApp(db) {
     const url = new URL(req.url, "http://localhost");
     const path = url.pathname;
     const authRequired = authEnabled(db);
-    const me = currentUser(req);
+    // 没开账号时（本地/演示）所有人都按 lead 算 —— 这是「单机模式」，不是漏洞：
+    // 开了账号（哪怕一个）之后 authRequired 为真，这里不再兜底，所有动作都要真人身份。
+    const me = currentUser(req) || (authRequired ? null : { name: "anonymous", role: "lead", active: true });
 
     try {
       // 登录/登出自己不需要先登录（否则永远进不去）
@@ -282,7 +287,74 @@ export function createApp(db) {
       if (req.method === "GET" && pm) {
         const p = getProject(db, pm[1]);
         if (!p) return json(res, 404, { error: "not found" });
-        return json(res, 200, { project: p, events: eventsOfProject(db, p.id) });
+        return json(res, 200, {
+          project: p,
+          events: eventsOfProject(db, p.id),
+          // 看板要看到「谁在盯、聊过什么、定了什么、交了什么」——这些都是账本里的对象，不是前端拼的。
+          memory: memoryOf(db, p.id),
+          decisions: decisionsOf(db, p.id),
+          assets: assetsOf(db, p.id),
+        });
+      }
+
+      // 阶段负责人：分发是账本动作（换人留痕），不是界面上的一个标签。
+      const powner = path.match(/^\/api\/projects\/([^/]+)\/stages\/([^/]+)\/owner$/);
+      if (req.method === "POST" && powner) {
+        const b = await readBody(req);
+        const p = getProject(db, powner[1]);
+        if (!p) return json(res, 404, { error: "not found" });
+        const c = can(me, "assign_stage_owner", null, p);
+        if (!c.ok) return json(res, 403, { error: c.error });
+        try {
+          const next = assignStageOwner(db, p.id, decodeURIComponent(powner[2]), { owner: String(b.owner || ""), by: me ? me.name : "cli" });
+          return json(res, 200, { project: next });
+        } catch (e) { return json(res, 400, { error: String(e.message || e) }); }
+      }
+
+      // 项目记忆：机器在阶段交付时自动写，人也可以补一条自己的判断。
+      if (req.method === "POST" && (path.match(/^\/api\/projects\/([^/]+)\/memory$/))) {
+        const pid = path.split("/")[3];
+        const b = await readBody(req);
+        const c = can(me, "add_memory");
+        if (!c.ok) return json(res, 403, { error: c.error });
+        try {
+          const id = addMemory(db, pid, { kind: String(b.kind || "decision"), text: b.text, source: b.source || "人写的", by: me ? me.name : "cli" });
+          return json(res, 201, { memory_id: id, memory: memoryOf(db, pid) });
+        } catch (e) { return json(res, 400, { error: String(e.message || e) }); }
+      }
+
+      // 复议会：机器开（确定性提案），人拍板（每个 choice 都机械可执行）。
+      const pdec = path.match(/^\/api\/projects\/([^/]+)\/decisions\/([^/]+)$/);
+      if (req.method === "POST" && pdec) {
+        const b = await readBody(req);
+        const c = can(me, "resolve_decision");
+        if (!c.ok) return json(res, 403, { error: c.error });
+        try {
+          const out = resolveDecision(db, pdec[1], pdec[2], { choice: String(b.choice || ""), note: b.note || null, by: me ? me.name : "cli" });
+          return json(res, 200, { project: out.project, decision: out.decision, effects: out.effects });
+        } catch (e) { return json(res, 400, { error: String(e.message || e) }); }
+      }
+
+      // 收尾：签收资产 = 项目真正 done。全收/部分收/全拒都行。
+      const pas = path.match(/^\/api\/projects\/([^/]+)\/assets$/);
+      if (req.method === "POST" && pas) {
+        const b = await readBody(req);
+        const c = can(me, "settle_assets");
+        if (!c.ok) return json(res, 403, { error: c.error });
+        try {
+          const out = decideAssets(db, pas[1], {
+            accept: Array.isArray(b.accept) ? b.accept : [], decline: Array.isArray(b.decline) ? b.decline : [],
+            by: me ? me.name : "cli", note: b.note || null,
+          });
+          return json(res, 200, { project: out.project, pending: out.pending });
+        } catch (e) { return json(res, 400, { error: String(e.message || e) }); }
+      }
+
+      if (req.method === "GET" && path === "/api/assets") {
+        return json(res, 200, { assets: listAssets(db, { status: new URL(req.url, "http://x").searchParams.get("status") || null }) });
+      }
+      if (req.method === "GET" && path === "/api/decisions") {
+        return json(res, 200, { decisions: db.prepare("SELECT * FROM decisions WHERE status='open' ORDER BY created_at ASC").all() });
       }
 
       // 预备会：机器先开，人之后再来看。默认走确定性模板（不烧 token）；
@@ -320,6 +392,7 @@ export function createApp(db) {
         try {
           const out = startStage(db, pstart[1], decodeURIComponent(pstart[2]), {
             by: me.name, budgetTokens: b.budgetTokens ? Number(b.budgetTokens) : null,
+            assignee: b.assignee ? String(b.assignee) : null,
           });
           return json(res, 201, { task: out.task, project: getProject(db, pstart[1]) });
         } catch (e) { return json(res, 400, { error: String(e.message || e) }); }

@@ -25,6 +25,9 @@ process.env.WB_ENGINE = "mock";
 const { openDb } = await import("../src/core/db.mjs");
 const { getTask, record, transition } = await import("../src/core/ledger.mjs");
 const st = await import("../src/core/stages.mjs");
+const { decisionsOf, resolveDecision } = await import("../src/core/meetings.mjs");
+const { memoryOf } = await import("../src/core/memory.mjs");
+const { assetsOf, decideAssets } = await import("../src/core/retro.mjs");
 const { pump } = await import("../src/runner/worker.mjs");
 const { default: createStage } = await import("../src/runner/providers/stage.mjs");
 
@@ -176,11 +179,19 @@ const g3 = (s3.task.evidence && s3.task.evidence.verify && s3.task.evidence.veri
 check("实现阶段护栏全绿（含阶段闸门）", g3.length > 0 && g3.every((c) => c.ok), g3.filter((c) => !c.ok).map((c) => c.id).join(","));
 check("乘法除法真的进了主干", /mul/.test(readFileSync(join(REPO, "src/calc.mjs"), "utf8")));
 
-console.log("\n[8] 跑合并阶段 -> 项目自动收尾");
+console.log("\n[8] 跑合并阶段 -> 项目自动收尾（沉淀包 + 资产签收）");
 const s4 = await runStage(db, good, p1.id, "合并");
 check("合并阶段 done", s4.task.state === "done", s4.task.state);
 const finalP = st.getProject(db, p1.id);
-check("项目自动推进到 done（不需要人再点完成）", finalP.state === "done", finalP.state);
+check("项目进入 settling：阶段交付完不等于项目完，沉淀包要生成并签收", finalP.state === "settling", finalP.state);
+const assets1 = assetsOf(db, p1.id);
+check("收尾提出 2 个可复用资产（workflow + 契约模板）", assets1.length === 2, assets1.map((a) => a.kind).join("/"));
+check("复盘/决议/记忆/冻结 workflow 全部落盘",
+  ["postmortem.md", "decisions.md", "memory.md", "workflow.json", "contract-template.md"]
+    .every((n) => existsSync(join(WS, "projects", p1.id, n))));
+check("记忆里有本阶段自动攒下的条目（决定/约束/踩坑/接口）", memoryOf(db, p1.id).length >= 4, String(memoryOf(db, p1.id).length));
+const settled1 = decideAssets(db, p1.id, { accept: assets1.map((a) => a.asset_id), by: "lead0", note: "模板留着，下次直接用" });
+check("人签收资产后项目才 done（第 3 次也是最后一次签字）", settled1.project.state === "done", settled1.project.state);
 
 console.log("\n[9] 反例：agent 在「设计」阶段顺手改实现，闸门必须打回");
 const p2 = st.createProject(db, { title: "顺手改实现的坏例子", repo: "repo", lane: "feature", owner: "alice" });
@@ -196,7 +207,31 @@ check("任务没有直接合进主干", bad.task.state !== "done", bad.task.stat
 const bl = st.backlogOf(db, p2.id).filter((b) => b.source === "guard");
 check("越界的想法落进 backlog，等人分流", bl.length >= 1, ((bl[0] && bl[0].text) || "").slice(0, 80));
 
-console.log("\n[10] 杂活 lane：不开会，一个阶段，签一次");
+console.log("\n[10] 复议会：越界不改代码，改边界 —— 拍板后任务自动回到队列");
+const openDec = decisionsOf(db, p2.id).filter((d) => d.status === "open");
+check("越界直接开了一张复议会（没有先烧一轮 Verifier）", openDec.some((d) => d.trigger === "scope"), openDec.map((d) => d.trigger).join("/"));
+const dec = openDec.find((d) => d.trigger === "scope");
+const resolved = resolveDecision(db, p2.id, dec.decision_id, { choice: "extend_scope", by: "lead0", note: "这个阶段确实需要动实现，扩边界" });
+check("扩边界后阶段 allowed_globs 变大", (st.getStage(db, dec.stage_id).allowedGlobs || []).some((g) => g.startsWith("src/")),
+  (st.getStage(db, dec.stage_id).allowedGlobs || []).join(","));
+const resumedStage = resolved.project.stages.find((s) => s.stage_id === dec.stage_id);
+const resumedTask = resumedStage && resumedStage.task_id ? (await import("../src/core/ledger.mjs")).getTask(db, resumedStage.task_id) : null;
+check("被卡住的任务自动回到队列（人不需要再点重试）", resumedTask && resumedTask.state === "queued", String(resumedTask && resumedTask.state));
+check("拍板本身写进项目记忆（下次遇到同类问题先看这里）",
+  memoryOf(db, p2.id).some((m) => m.kind === "decision" && /扩边界|extend_scope/.test(m.text)));
+
+console.log("\n[11] 阶段负责人：分发不是界面标签，是账本动作");
+const ownerP = st.createProject(db, { title: "给 calc 加阶乘", repo: "repo", lane: "chore", owner: "alice" });
+await st.meetProject(db, ownerP.id, {});
+triageAll(db, ownerP.id);
+st.signStages(db, ownerP.id, { group: "A", by: "lead0" });
+const assigned = st.startStage(db, ownerP.id, 1, { by: "alice", assignee: "carol" });
+check("开工时指派负责人，阶段上记下来", st.getProject(db, ownerP.id).stages[0].owner === "carol",
+  String(st.getProject(db, ownerP.id).stages[0].owner));
+const reassigned = st.assignStageOwner(db, ownerP.id, assigned.task.stage_id, { owner: "dave", by: "lead0" });
+check("按 stage_id 换负责人也认（界面按钮带的就是 id）", reassigned.stages[0].owner === "dave", String(reassigned.stages[0].owner));
+
+console.log("\n[12] 杂活 lane：不开会，一个阶段，签一次");
 const p3 = st.createProject(db, { title: "升级依赖小版本", repo: "repo", lane: "chore", owner: "alice" });
 const met3 = await st.meetProject(db, p3.id, {});
 check("杂活只有 1 个阶段", met3.stages.length === 1, met3.stages.map((s) => s.name).join("/"));

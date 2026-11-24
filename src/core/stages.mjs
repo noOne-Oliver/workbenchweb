@@ -17,7 +17,8 @@ import { sh } from "../runner/worktree.mjs";
  */
 
 export const LANES = ["feature", "chore"];
-export const PROJECT_STATES = ["drafting", "proposed", "running", "done"];
+// settling = 阶段都交付了，但沉淀包还没签收。项目不在这里停一下，资产就永远没人整理。
+export const PROJECT_STATES = ["drafting", "proposed", "running", "settling", "done"];
 export const STAGE_STATES = ["proposed", "approved", "running", "done", "blocked"];
 
 const parseJson = (s, d) => {
@@ -292,7 +293,7 @@ export function signStages(db, projectId, { group, by = "unknown", role = null, 
 }
 
 /** 阶段开工：给这个阶段建一条真正的任务，并把它挂上去。任务本身走原来的执行器。 */
-export function startStage(db, projectId, ref, { by = "system", budgetTokens = null } = {}) {
+export function startStage(db, projectId, ref, { by = "system", budgetTokens = null, assignee = null } = {}) {
   const p = getProject(db, projectId);
   if (!p) throw new Error("项目不存在: " + projectId);
   if (p.state === "done") throw new Error("项目已完成");
@@ -307,6 +308,11 @@ export function startStage(db, projectId, ref, { by = "system", budgetTokens = n
   if (behind.length) {
     throw new Error("先等 " + behind.map((s) => "「" + s.name + "」").join("、") + " 交付完：阶段要按顺序走，跳关就是发散");
   }
+  // 分发：阶段的负责人就是「盯这一关的人」，不一定是提交者。
+  // 不指派也可以跑（负责人空着），但看板里「只看我盯的」就筛不到它 —— 这是故意的。
+  if (assignee && assignee !== stage.owner) {
+    record(db, { type: "stage.owner.assigned", actor: by, payload: { project_id: projectId, stage_id: stage.stage_id, owner: assignee } });
+  }
   const t = createTask(db, {
     title: stage.goal, repo: p.repo, owner: by,
     budgetTokens: Number(budgetTokens || p.budget_tokens || 1_000_000),
@@ -319,6 +325,18 @@ export function startStage(db, projectId, ref, { by = "system", budgetTokens = n
   });
   // 返回重放后的任务：createTask 的返回值是插入前那一刻的投影，stage_id 还没写上去。
   return { project: getProject(db, projectId), task: getTask(db, t.id) };
+}
+
+/** 换负责人：分发是账本动作，不是界面上的一个标签。 */
+export function assignStageOwner(db, projectId, ref, { owner, by = "system" } = {}) {
+  const p = getProject(db, projectId);
+  if (!p) throw new Error("项目不存在: " + projectId);
+  if (p.state === "done") throw new Error("项目已完成");
+  const stage = findStage(p, ref);
+  if (!stage) throw new Error("没有这个阶段: " + ref);
+  if (!owner || !String(owner).trim()) throw new Error("负责人不能为空");
+  record(db, { type: "stage.owner.assigned", actor: by, payload: { project_id: projectId, stage_id: stage.stage_id, owner: String(owner).trim() } });
+  return getProject(db, projectId);
 }
 
 export function findStage(project, ref) {
@@ -371,10 +389,12 @@ export function advanceProject(db, projectId, { by = "system" } = {}) {
   const p = getProject(db, projectId);
   if (!p) return null;
   if (p.state === "done") return p;
+  // 阶段全完了不等于项目完了：还要生成沉淀包、签收资产（见 retro.mjs）。
+  // 收尾被打断（进程崩了）也没关系：settling 是持久状态，重启后 worker 会补跑收尾。
   if (p.stages.length && p.stages.every((s) => s.state === "done")) {
     record(db, {
       type: "project.transition", actor: by,
-      payload: { project_id: projectId, from: p.state, to: "done", reason: "所有阶段都已交付" },
+      payload: { project_id: projectId, from: p.state, to: "settling", reason: "所有阶段都已交付，生成沉淀包待签收" },
     });
     return getProject(db, projectId);
   }

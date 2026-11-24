@@ -41,11 +41,14 @@ export function architectPrompt(task, slices, repoPath) {
   ].join("\n");
 }
 
-export function coderPrompt(task, plan, attempt, feedback) {
+export function coderPrompt(task, plan, attempt, feedback, memory = "") {
   const lines = [RULES, "",
     "## 角色：Coder（只实现，不自评）",
     "任务：" + task.title,
     "第 " + (attempt + 1) + " 次尝试。"];
+  if (memory && String(memory).trim()) {
+    lines.push("", String(memory).trim());
+  }
   if (plan && plan.trim()) {
     lines.push("", "## 方案", plan);
   } else {
@@ -74,10 +77,12 @@ export function coderPrompt(task, plan, attempt, feedback) {
 }
 
 /** 刻意不传 plan 里的 Coder 过程，只给 diff 与真实命令输出。 */
-export function verifierPrompt({ task, diff, testOutput, guards }) {
+export function verifierPrompt({ task, diff, testOutput, guards, memory = "" }) {
+  const mem = memory && String(memory).trim() ? ["", String(memory).trim()] : [];
   return [RULES, "",
     "## 角色：Verifier（独立判卷，与 Coder 不同实例）",
     "任务：" + task.title,
+    ...mem,
     "", "## 变更 diff", diff.slice(0, 20000),
     "", "## 测试命令的真实输出", testOutput.slice(0, 8000),
     "", "## 机器护栏结论", JSON.stringify(guards.checks, null, 2),
@@ -92,11 +97,12 @@ export function verifierPrompt({ task, diff, testOutput, guards }) {
  * 不再把原始测试输出整段重贴：那一份几千字，重贴一次就是白烧上下文，
  * 而且它要回答的只有「证据裁决不了什么」，不是「测试过没过」——后者 Verifier 已经答了。
  */
-export function reviewerPrompt({ task, plan, diff, guards, verifier }) {
+export function reviewerPrompt({ task, plan, diff, guards, verifier, memory = "" }) {
   const v = verifier || {};
   const lines = [RULES, "",
     "## 角色：Agent Reviewer（只上抛，不做最终决定）",
     "任务：" + task.title,
+    ...(memory && String(memory).trim() ? ["", String(memory).trim()] : []),
     "", "## 方案", String(plan || "（快路径：无上游拆解）").slice(0, 4000),
     "", "## 变更 diff", String(diff || "").slice(0, 12000),
     "", "## 机器护栏", JSON.stringify(guards.checks, null, 2),

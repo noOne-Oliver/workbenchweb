@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -13,6 +13,7 @@ import {
   completeStageForTask, stageGateFor,
 } from "../src/core/stages.mjs";
 import { artifactExists, runGuards } from "../src/runner/guards.mjs";
+import { settleProject, settlePending, decideAssets, assetsOf } from "../src/core/retro.mjs";
 
 const freshDb = () => openDb(resolve(mkdtempSync(join(tmpdir(), "wb-stages-")), "t.db"));
 
@@ -165,14 +166,53 @@ test("阶段闸门 stage_artifacts：产出物缺失即 FAIL，通配目录也�
   assert.match(art.detail, /docs\/design\.md/);
 });
 
-test("阶段收尾：合并完自动标 done，全部 done 后项目自己收口", async () => {
+test("阶段收尾：全部阶段 done → 进 settling，收尾写沉淀包、人签收资产后项目才 done", async () => {
   const db = freshDb();
-  const { p } = await ready(db, { lane: "chore", title: "补一条测试" });
-  signStages(db, p.id, { group: "A", by: "lead0" });
-  const out = startStage(db, p.id, 1, { by: "alice" });
-  const stage = getProject(db, p.id).stages[0];
-  completeStageForTask(db, { ...out.task, stage_id: stage.stage_id }, { by: "worker" });
-  const after = getProject(db, p.id);
-  assert.equal(after.stages[0].state, "done");
-  assert.equal(after.state, "done", "单阶段项目交付完就该收口，不需要人再点完成");
+  const root = mkdtempSync(join(tmpdir(), "wb-retro-"));
+  process.env.WB_ROOT = root;
+  try {
+    const { p } = await ready(db, { lane: "chore", title: "补一条测试" });
+    signStages(db, p.id, { group: "A", by: "lead0" });
+    const out = startStage(db, p.id, 1, { by: "alice" });
+    const stage = getProject(db, p.id).stages[0];
+    completeStageForTask(db, { ...out.task, stage_id: stage.stage_id }, { by: "worker" });
+    const after = getProject(db, p.id);
+    assert.equal(after.stages[0].state, "done");
+    assert.equal(after.state, "settling", "阶段交付完先进 settling：沉淀包还没生成、没签收");
+
+    const settled = settleProject(db, p.id, { by: "worker" });
+    assert.equal(settled.project.state, "settling");
+    assert.equal(settled.written.length, 5, "postmortem / decisions / memory / workflow / contract 五份");
+    const assets = assetsOf(db, p.id);
+    assert.equal(assets.length, 2, "workflow + 契约模板两个候选");
+    assert.ok(existsSync(join(root, "projects", p.id, "postmortem.md")));
+    assert.ok(existsSync(join(root, "projects", p.id, "decisions.md")));
+    assert.ok(existsSync(join(root, "projects", p.id, "memory.md")));
+    assert.ok(existsSync(join(root, "projects", p.id, "workflow.json")));
+
+    const out2 = decideAssets(db, p.id, { accept: assets.map((a) => a.asset_id), by: "lead0", note: "这套模板留着" });
+    assert.equal(out2.project.state, "done");
+    assert.equal(out2.pending.length, 0);
+    assert.ok(assetsOf(db, p.id).every((a) => a.status === "accepted"));
+  } finally {
+    delete process.env.WB_ROOT;
+  }
+});
+
+test("收尾被打断（崩溃）后补跑：settling 且没资产的项目会被 settlePending 捡起来", async () => {
+  const db = freshDb();
+  const root = mkdtempSync(join(tmpdir(), "wb-retro2-"));
+  process.env.WB_ROOT = root;
+  try {
+    const { p } = await ready(db, { lane: "chore", title: "补一条测试" });
+    signStages(db, p.id, { group: "A", by: "lead0" });
+    const out = startStage(db, p.id, 1, { by: "alice" });
+    const stage = getProject(db, p.id).stages[0];
+    completeStageForTask(db, { ...out.task, stage_id: stage.stage_id }, { by: "worker" });
+    assert.equal(assetsOf(db, p.id).length, 0, "模拟收尾没跑");
+    assert.equal(settlePending(db, { by: "worker" }), 1);
+    assert.equal(assetsOf(db, p.id).length, 2);
+  } finally {
+    delete process.env.WB_ROOT;
+  }
 });

@@ -67,7 +67,7 @@ AI 写代码的工具已经很多了，**能无人值守跑一天的很少**。�
 
 ![状态机：两个琥珀色的人闸，其余全自动](docs/flow.svg)
 
-只有 `awaiting_review` 和 `awaiting_approval` 会停住等人（`blocked` 是「机器认输了，等人捞」）。
+只有 `awaiting_review` 和 `awaiting_approval` 会停住等人（`blocked` 是「机器认输了，等人捞」；项目层还多一个 `settling`，表示「阶段全交付了，沉淀包等你签收」）。
 任务上面还有一层：**项目 = 阶段链**（设计 → 契约 → 实现 → 合并），每个阶段开工时会生成一个普通任务，所以下图这套状态机、租约、护栏、两段评审全部原样复用（见[第四节](#四项目就是阶段链把发散变成机械可拦的东西)）。
 其余状态之间的每一次失败，都走同一条路：**带证据打回 → 重置 worktree → 重做**，最多 3 轮（`WB_MAX_ATTEMPTS`）。
 
@@ -149,12 +149,14 @@ AI 写代码的工具已经很多了，**能无人值守跑一天的很少**。�
 - **开会异步**：机器先开预备会，人 10 分钟只看三样（阶段表 / 边界 / 要拍板的发散项）；会议**不许放松边界**。
 - **杂活不开会**：1 阶段、1 次签字，实测 1 分钟。
 
-证据：`npm run demo:stage` 31 项检查 5 秒跑完；反例里 agent 在设计阶段顺手改 `src/calc.mjs`，被点名打回。详见[第四节](#四项目就是阶段链把发散变成机械可拦的东西)。
+证据：`npm run demo:stage` 41 项检查 5 秒跑完；反例里 agent 在设计阶段顺手改 `src/calc.mjs`，被点名打回并进复议会。详见[第四节](#四项目就是阶段链把发散变成机械可拦的东西)。
 
 ---
 ## 四、项目就是阶段链：把发散变成机械可拦的东西
 
-![项目与阶段链：目标、边界、产出物先签字，再开工；越界的想法落 backlog 强制分流](docs/projects.png)
+![项目与阶段链（首屏）：收尾沉淀包等签收；目标是数据，越界是 FAIL](docs/projects.png)
+
+![项目与阶段链（下半屏）：一张等你拍板的复议会，和全团队共享的项目记忆](docs/projects-meeting.png)
 
 单任务解决「写一遍」，解决不了「写对一整套」。整套开发会死于两件事：**目标漂移**（越写越远，最后交付了个别的东西）和**签字疲劳**（每次提交都看一眼，人又退回值班员）。
 
@@ -213,6 +215,69 @@ AI 写代码的工具已经很多了，**能无人值守跑一天的很少**。�
 
 闸门只判「存在 / 不越界 / 清单覆盖」，**不假装判质量** —— 质量仍然归 Verifier 和人。越界还会自动落一条 `backlog`（source=`guard`），签字时必须分流：下一阶段做 / 以后做 / 不做。
 
+### 阶段负责人：分发之后，还得知道谁在盯
+
+签字只是「这个阶段可以做」，不等于「有人在等它」。所以阶段多一个 `owner`：开工时 `startStage(..., { assignee })` 顺手落一条 `stage.owner.assigned`，之后 lead 或项目发起人可以在卡片上换人（`assignStageOwner`，按钮叫「换人」）。
+
+看板顶部的「只看我盯的」不是视觉过滤，而是同一个谓词：项目是我发起的，或者某个阶段的负责人是我。多人同时开五个项目时，这一下把「以为别人在看」变成一个能被界面回答的问题。
+
+实测（`npm run shot:projects`）：4 个项目 → 点「只看我盯的」→ 只剩 2 个（自己发起的），按钮变「看全部项目」→ 再点恢复 4 个；把 C 项目 1 设计的负责人改成 bob，卡片上立刻显示「负责人 bob」。
+
+### 项目记忆：全团队共享的 200 字结论
+
+项目记忆不是聊天记录，是**下一个人（或 agent）能直接照做的结论**。存 `memory` 表，只有四种类型：`decision` 决定 / `constraint` 约束 / `pitfall` 踩坑 / `interface` 接口；append-only，每条 ≤200 字、必须带来源（哪个阶段、哪个护栏、谁说的）。
+
+两个来源：
+
+1. **阶段合并时自动攒**（`recordStageMemory`）：本阶段的决定、约束、踩坑 ×2、接口，全从账本和阶段数据里取，不额外调模型。
+2. **人手工补**（卡片上的「＋ 记一条」）：agent 不会总结自己，人的一句「取模只做整数」比十段日志值钱。
+
+注入有预算，不然记忆会把 token 拖翻倍：`memoryDigest` 只给 **最近 8 条 + 按角色召回 5 条**（coder 关心接口和踩坑，lead 关心决定），去重后最多 13 条，拼进 coder / verifier / reviewer 的提示词。收尾时全量导出成 `memory.md`，成为项目资产。
+
+实测：项目 C 界面补一条后，列表出现「约束 · UI 点击补记：取模允许负数，按数学定义取余（人工补充）」；demo 里四阶段跑完自动攒到 ≥4 条。
+
+### 复议会：只有机械触发才开会，决议必须能被执行
+
+预备会回答「这件事怎么做」，复议会只回答一个具体问题：**「按现在签的字，这一处做不下去了，改不改」**。触发是机械的五种（`src/core/meetings.mjs` 的 `TRIGGERS`），不是模型觉得自己需要开会：
+
+| 触发 | 判据 | 阻不阻断 |
+| --- | --- | --- |
+| `scope` 越界 | `stage_scope` 护栏 FAIL | **阻断**：任务直接 `blocked`，不花 Verifier 的钱 |
+| `contract` 改契约 | 实现阶段动了契约/接口文件 | **阻断** |
+| `baseline` 回归连挂 | 本次与上一次 `no_regression` 都失败 | 只提议 |
+| `size` 体量过大 | 本次 diff > 8 个文件 | 只提议 |
+| `budget` 预算七成 | 本任务花费 / 预算 ≥ 0.7 | 只提议 |
+
+提案是确定性生成的（零 token）：现状、可选路线、机器建议、**历史上类似资产召回**（最多 3 条）都摆在一张卡里，人只选一条。
+
+关键是**每个选项都必须能机械执行**，否则「拍板」只是给界面换颜色：
+
+- `extend_scope`：把越界目录写进本阶段 `allowed_globs`，同时把卡住的 `blocked` 任务放回 `queued` 继续跑。
+- `next_stage` / `split`：越界部分落 `backlog`，当前任务不再硬做。
+- `raise_budget`：项目预算与当前任务预算各 ×1.5。
+- `abort`：阶段标 `blocked`，不再自动重试，等人接手。
+
+决议本身也进项目记忆（kind=`decision`）。同一项目 + 阶段 + 触发只允许一张 open 卡；对同一张卡二次拍板会报「这个决议已经拍过板了」。
+
+实测：demo 步骤 [10] 开一张越界卡 → 拍「扩边界」→ `allowed_globs` 真的多了 `src/**`、任务回到队列、记忆里多一条「扩边界」；界面上点「扩边界」后卡当场消失（`ui-click-2`）。
+
+### 收尾资产：第 3 次签字，只签可复用的东西
+
+阶段全部 `done` 之后项目不直接结束，先进 `settling`：机器从账本生成沉淀包（**零 token，全部是已有事实的整理**）：
+
+| 文件 | 内容 |
+| --- | --- |
+| `postmortem.md` | 阶段表、成本、人工评审秒数、护栏失败、backlog、记忆 |
+| `decisions.md` | 每张复议会的提案原文与最终选择（`<details>` 可展开） |
+| `memory.md` | 全量项目记忆 |
+| `workflow.json` | 冻结的阶段链，下次可直接套用 |
+| `contract-template.md` | 本次的契约/边界模板 |
+
+同时提两个可复用资产（`workflow` / `contract`），由 lead 收下或不要 —— 这是全流程的**第 3 次签字**，而且只有存在可复用资产时才签。全部表决完项目才 `done`。
+
+崩溃也不怕：`settling` 是持久状态，`pump` 每轮开头 `settlePending` 会给「在 settling 但还没资产」的项目补跑收尾。
+
+实测：项目 D 四阶段交付 → `settling` + 2 个资产 + 5 份文件落盘 → 界面点两次「收下」→ 项目「已交付」；另一个用例直接调 `settlePending` 补跑，返回 1 个项目、2 个资产。
 ### 为什么这比「一群 agent 在群里聊」强
 
 1. **目标是数据，不是提示词**：`goal` 落库、批准后不可变；模型没法在第五轮忘了第一轮说过什么，闸门照着数据机械执行。
@@ -433,7 +498,7 @@ WB_ENGINE=opencode WB_MODEL=<provider/model> WB_BUDGET=1000000 WB_ROOT=~/Workben
 
 ### ④ 阶段链（确定性引擎，零成本，5 秒）
 
-`npm run demo:stage` 的 31 项检查（不需要模型，所以可以每次都跑）：
+`npm run demo:stage` 的 41 项检查（不需要模型，所以可以每次都跑）：
 
 | 检查项 | 结果 |
 | --- | --- |
@@ -442,7 +507,9 @@ WB_ENGINE=opencode WB_MODEL=<provider/model> WB_BUDGET=1000000 WB_ROOT=~/Workben
 | 开工闸门 | 未签字的阶段开不了工（「阶段「设计」还没签字（当前 proposed）：先签 A 组」） |
 | 阶段闸门 | 设计与契约阶段真的产出 `docs/design.md`、`docs/design.svg`、`docs/contract.md` 并进主干；实现阶段护栏 8/8 全绿 |
 | 反例 | agent 在设计阶段改 `src/calc.mjs` → `stage_scope` FAIL 点名、任务 `blocked`、越界文件自动落 backlog |
-| 收尾 | 合并阶段 done 后项目自动 done；总签字 2 次；人估算 10 分钟 |
+| 阶段负责人 | 开工时指派 carol，落 `stage.owner.assigned`；之后用 stage_id 改派 dave，看板「只看我盯的」按项目/阶段 owner 过滤 |
+| 复议会 | 越界卡一张 → 「扩边界」→ `allowed_globs` 含 `src/**`、blocked 任务回 `queued`、决议写进项目记忆；再拍一次报「已经拍过板」 |
+| 收尾 | 四阶段交付完项目进 `settling`（不是直接 done），从账本生成 5 份沉淀文件 + 2 个可复用资产；签收后 done；总签字 2 次；人估算 10 分钟 |
 | 界面三步真点 | 无头浏览器点「下一阶段做」→「签 A 组」→「开工 1 设计」：状态变「进行中」、出现「已签 A 组（设计+契约）· lead0：…」、任务卡 3→4、开工按钮消失、没有弹错误（`npm run shot:projects`） |
 
 ---
@@ -484,7 +551,7 @@ node src/cli.mjs user add|passwd|role|disable|enable|list
 npm run web | web:status | web:logs | web:stop   # 进程管理
 node src/cli.mjs project new|list|show|meet|sign|start|backlog   # 项目 = 阶段链
 npm run demo:stage                               # 阶段链端到端演示（31 项检查，5 秒，零成本）
-npm run shot:projects                             # 重新生成 docs/projects.png（需要本机 Chrome）
+npm run shot:projects                             # 重新生成 docs/projects.png + projects-meeting.png，并真点一遍界面（需要本机 Chrome）
 npm run demo:reset                               # demo 仓库恢复到种子状态
 npm run docs:diagrams                            # 重新生成 docs/arch.svg · flow.svg · cost.svg
 npm run shots                                    # 重新生成界面截图（需要本机 Chrome）
@@ -584,13 +651,14 @@ npm test                                         # 内核测试（90 项）
 
 ```text
 src/core/     账本、事件、状态机、租约、工作区、活动流、体量分级、身份、权限、看护、
-              项目/阶段链（stages.mjs）、工作流模板（workflows.mjs）、glob 边界（glob.mjs）
+              项目/阶段链（stages.mjs）、工作流模板（workflows.mjs）、glob 边界（glob.mjs）、
+              项目记忆（memory.mjs）、复议会（meetings.mjs）、收尾资产（retro.mjs）
 src/runner/   worker 循环、SOP 提示词、护栏（含回归基线 + 阶段闸门）、worktree、引擎 provider
               （`stage` = 确定性按阶段产出，演示与截图都用它，不联网）
 src/server/   HTTP + 静态审阅界面 + 登录/权限/两段评审 API
 web/          审阅收件箱（三栏 / 新建任务 / 按文件分组 diff / 测试清单 / 全屏原始输出 / 活动流）
 sandbox/demo/ 演示用目标仓库（有真测试，能真跑）
-tests/        内核测试（90 项）
+tests/        内核测试（101 项）
 scripts/      启动器、demo 重置 / 重试 / 阶段链演示、引擎体检、真引擎基准、截图与配图
 ```
 

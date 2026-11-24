@@ -133,8 +133,53 @@ function migrate(db) {
     );
   `);
 
+  // 团队共享记忆 / 复议会 / 资产库：三张表的真源都在 events 里，这里只是投影。
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS memory (
+      memory_id   TEXT PRIMARY KEY,
+      project_id  TEXT NOT NULL,
+      kind        TEXT NOT NULL,
+      text        TEXT NOT NULL,
+      source      TEXT,
+      by          TEXT,
+      created_at  TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_memory_project ON memory(project_id, created_at);
+
+    CREATE TABLE IF NOT EXISTS decisions (
+      decision_id TEXT PRIMARY KEY,
+      project_id  TEXT NOT NULL,
+      stage_id    TEXT,
+      trigger     TEXT NOT NULL,
+      status      TEXT NOT NULL DEFAULT 'open',
+      proposal    TEXT,
+      options     TEXT NOT NULL DEFAULT '[]',
+      evidence    TEXT NOT NULL DEFAULT '[]',
+      choice      TEXT,
+      by          TEXT,
+      note        TEXT,
+      created_at  TEXT NOT NULL,
+      resolved_at TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_decisions_project ON decisions(project_id, status);
+
+    CREATE TABLE IF NOT EXISTS assets (
+      asset_id   TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL,
+      kind       TEXT NOT NULL,
+      title      TEXT NOT NULL,
+      path       TEXT NOT NULL,
+      status     TEXT NOT NULL DEFAULT 'proposed',
+      by         TEXT,
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_assets_status ON assets(status, created_at);
+`);
+
   addColumn(db, "tasks", "project_id", "TEXT");
   addColumn(db, "tasks", "stage_id", "TEXT");
+  addColumn(db, "stages", "owner", "TEXT");
+  addColumn(db, "projects", "settled_at", "TEXT");
 
   // 两段评审（初筛 / 终审）新增的列。老库直接 ALTER，新库在这里补齐。
   addColumn(db, "tasks", "reviewer", "TEXT");

@@ -6,7 +6,10 @@ import { getProvider } from "./engine.mjs";
 import { sh, ensureWorktree, resetToBase, commitAll, diffStat, diffPatch, headSha, isGitRepo, statusPorcelain, newlyDirty, restorePaths } from "./worktree.mjs";
 import { loadRepoConfig, runGuards } from "./guards.mjs";
 import { classifySize, repoFileCount } from "../core/sizing.mjs";
-import { stageForTask, stageGateFor, completeStageForTask, addBacklog, advanceProject } from "../core/stages.mjs";
+import { stageForTask, stageGateFor, completeStageForTask, addBacklog, advanceProject, getProject } from "../core/stages.mjs";
+import { openDecision } from "../core/meetings.mjs";
+import { settleProject, settlePending } from "../core/retro.mjs";
+import { addMemory, memoryDigest } from "../core/memory.mjs";
 import { agentForRole } from "../core/workflows.mjs";
 import * as sop from "./sop.mjs";
 import { resolve, join } from "node:path";
@@ -343,7 +346,8 @@ async function doImplement(db, id, ctx) {
   // 同一个 provider，换的是"这个人现在是谁"——角色先于模型。
   await callAgent(db, id, { ...ctx, cwd: dir }, {
     role: agentForRole(stage ? stage.role : "coder"),
-    prompt: sop.coderPrompt(t, t.plan_md || "", attempt, retryFeedback(t, db)),
+    prompt: sop.coderPrompt(t, t.plan_md || "", attempt, retryFeedback(t, db),
+      memoryDigest(db, t.project_id, { role: stage ? stage.role : "coder" })),
     attempt,
   });
 
@@ -397,9 +401,34 @@ async function doVerify(db, id, ctx) {
     } catch { /* backlog 写不进去不该连带把验证搞挂 */ }
   }
 
+  // 越界不是"再试一次"能解决的：边界是签字定的，改边界要人拍板。
+  // 这里直接进复议会，省掉一轮 Verifier 的钱（真引擎一次 7 万 token）。
+  if (stage && scopeCheck && !scopeCheck.ok) {
+    const outside = (guards.files || []).filter((x) => (x.status === "A" || x.status === "M" || x.status === "D") && x.path)
+      .map((x) => x.path);
+    const d = openDecision(db, stage.project_id, {
+      trigger: "scope", stageId: stage.stage_id, by: ctx.workerId,
+      evidence: ["越界文件：" + outside.slice(0, 8).join("，"), "阶段边界：" + ((stage.allowedGlobs || []).join("、") || "（未限制）")],
+    });
+    // 没叫 Verifier，但证据必须落账：人打开任务要能直接看到「哪个文件越界了」，
+    // 而不是只看到一句「blocked，去开会」。
+    addEvidence(db, id, {
+      verify: {
+        passed: false, guards: guards.checks, guardsFailed: guards.failed, testCmd: guards.testCmd,
+        testCases: guards.testCases || null, baseline: guards.baseline || null,
+        testOutputTail: guards.testOutput.slice(-3000), diff: String(diff || "").slice(0, 12000),
+        verdict: { verdict: "fail", summary: "阶段边界被改动，已进复议会", raised: outside.slice(0, 6) },
+        at: new Date().toISOString(),
+      },
+      meeting: { decision_id: d.decision_id, trigger: "scope", at: new Date().toISOString() },
+    }, "verify.result");
+    transition(db, id, "blocked", { actor: ctx.workerId, reason: "等复议会拍板：改动越界（" + outside.slice(0, 3).join("，") + "）" });
+    return;
+  }
+
   const res = await callAgent(db, id, { ...ctx, cwd: dir }, {
     role: "verifier",
-    prompt: sop.verifierPrompt({ task: t, diff, testOutput: guards.testOutput, guards }),
+    prompt: sop.verifierPrompt({ task: t, diff, testOutput: guards.testOutput, guards, memory: memoryDigest(db, t.project_id, { role: "verifier" }) }),
   });
 
   const v = sop.parseVerdict(res.text) || { verdict: guards.ok ? "pass" : "fail", summary: "未给出结构化结论，按护栏判定", raised: [] };
@@ -419,6 +448,38 @@ async function doVerify(db, id, ctx) {
       at: new Date().toISOString(),
     },
   }, "verify.result");
+
+  if (!passed && stage) {
+    // 不阻断但要记账的三种情况：回归连挂、体量过大、预算七成。
+    // 它们不该让任务停下（停下就是让人当值班员），但必须出现在复议会列表里。
+    try {
+      const failedIds = (guards.checks || []).filter((c) => !c.ok).map((c) => c.id);
+      if (failedIds.includes("no_regression")) {
+        const prev = db.prepare("SELECT payload FROM events WHERE task_id=? AND type='verify.result' ORDER BY id DESC LIMIT 1").get(id);
+        let prevFailed = [];
+        try { prevFailed = (JSON.parse(prev && prev.payload).guardsFailed) || []; } catch { prevFailed = []; }
+        if (prevFailed.includes("no_regression")) {
+          openDecision(db, stage.project_id, {
+            trigger: "baseline", stageId: stage.stage_id, by: ctx.workerId,
+            evidence: ["连续两轮 no_regression 失败", "当前挂掉的用例：" + String((guards.baseline && guards.baseline.regressions || []).join("、") || "见测试输出")],
+          });
+        }
+      }
+      if ((guards.files || []).length > 8) {
+        openDecision(db, stage.project_id, {
+          trigger: "size", stageId: stage.stage_id, by: ctx.workerId,
+          evidence: ["本次改动 " + (guards.files || []).length + " 个文件：" + (guards.files || []).slice(0, 8).map((x) => x.path).join("，")],
+        });
+      }
+      const ratio = Number(t.spent_tokens || 0) / Math.max(1, Number(t.budget_tokens || 1));
+      if (ratio >= 0.7) {
+        openDecision(db, stage.project_id, {
+          trigger: "budget", stageId: stage.stage_id, by: ctx.workerId,
+          evidence: ["已花 " + Math.round(t.spent_tokens || 0) + " / " + (t.budget_tokens || 0) + "（" + Math.round(ratio * 100) + "%）", "剩余 " + Math.max(0, (t.budget_tokens || 0) - (t.spent_tokens || 0))],
+        });
+      }
+    } catch { /* 开会失败不该连带把验证搞挂 */ }
+  }
 
   if (passed) {
     transition(db, id, "reviewing", { actor: ctx.workerId, reason: "verified" });
@@ -476,6 +537,45 @@ function hasInflightAttempt(db, id) {
   return s > c;
 }
 
+/**
+ * 阶段交付时自动写记忆：决定、约束、踩坑、接口。
+ * 为什么由机器写：这几类事实在账本里本来就有（谁签的字、边界是什么、哪条护栏挂了），
+ * 让 agent「总结一下」既花钱又会美化。人可以在界面里再补一条自己的判断。
+ */
+function recordStageMemory(db, task, stage) {
+  try {
+    addMemory(db, stage.project_id, {
+      kind: "decision",
+      text: "阶段「" + stage.name + "」已交付并合并（任务 " + task.id + "，负责人 " + (stage.owner || "未指派") + "）",
+      source: "stage " + stage.stage_id, by: "system",
+    });
+    const globs = stage.allowedGlobs || [];
+    if (globs.length) {
+      addMemory(db, stage.project_id, {
+        kind: "constraint",
+        text: "阶段「" + stage.name + "」的边界：" + globs.join("、") + "；下一阶段不要顺手改这些路径之外的东西",
+        source: "stage " + stage.stage_id, by: "system",
+      });
+    }
+    const verify = (task.evidence && task.evidence.verify) || {};
+    const failed = (verify.guards || []).filter((g) => !g.ok).slice(0, 2);
+    for (const g of failed) {
+      addMemory(db, stage.project_id, {
+        kind: "pitfall",
+        text: "「" + stage.name + "」这一关在 " + g.id + " 上翻过车：" + String(g.detail || "").slice(0, 120),
+        source: "stage " + stage.stage_id, by: "system",
+      });
+    }
+    if ((stage.artifacts || []).some((a) => /contract|契约|interface|接口/i.test(a))) {
+      addMemory(db, stage.project_id, {
+        kind: "interface",
+        text: "「" + stage.name + "」的契约与产出物：" + (stage.artifacts || []).join("、") + "（接口变更要走复议会）",
+        source: "stage " + stage.stage_id, by: "system",
+      });
+    }
+  } catch { /* 记忆写失败不该让已经合并的任务变成失败 */ }
+}
+
 async function doMerge(db, id, ctx) {
   const t = getTask(db, id);
   const repo = resolve(ROOT, t.repo);
@@ -499,9 +599,14 @@ async function doMerge(db, id, ctx) {
 
   // 阶段的任务合进去了 = 这个阶段的交付物进了主干，阶段收工，项目自动判下一步。
   // 阶段完成是账本里的机械动作，不需要人再点一次"完成"。
+  const merged = getTask(db, id);
+  const stage = stageForTask(db, merged);
   try {
-    completeStageForTask(db, getTask(db, id), { by: ctx.workerId });
-    advanceProject(db, getTask(db, id).project_id, { by: ctx.workerId });
+    const done = completeStageForTask(db, merged, { by: ctx.workerId });
+    if (stage && done) recordStageMemory(db, merged, stage);
+    const p = advanceProject(db, merged.project_id, { by: ctx.workerId });
+    // 阶段都交付了：立刻生成沉淀包（不烧 token），等人签收资产才算项目完成。
+    if (p && p.state === "settling") settleProject(db, p.id, { by: ctx.workerId });
   } catch { /* 非阶段任务：没有 project_id，忽略 */ }
 }
 
@@ -516,6 +621,8 @@ export async function pump(db, { workerId, provider, once = false, idleMs = 1500
     for (;;) {
       reclaimDead(db);
       reclaimExpired(db);
+      // 收尾写到一半崩了：重启后补跑（已生成资产的不重复写）。
+      settlePending(db, { by: workerId });
       const cand = pickRunnable(db);
       if (!cand) {
         if (once) return null;

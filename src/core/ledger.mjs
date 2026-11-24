@@ -265,6 +265,14 @@ export function applyEvent(db, ev) {
     case "project.transition":
       db.prepare("UPDATE projects SET state=?, updated_at=? WHERE id=?").run(p.to, ev.ts, p.project_id);
       break;
+    // 复议会拍板加预算：项目和任务一起加，否则下一轮还是熔断。
+    case "project.patched":
+      db.prepare("UPDATE projects SET budget_tokens=COALESCE(?, budget_tokens), updated_at=? WHERE id=?")
+        .run(p.budget_tokens ?? null, ev.ts, p.project_id);
+      break;
+    case "task.budget.set":
+      db.prepare("UPDATE tasks SET budget_tokens=?, updated_at=? WHERE id=?").run(p.budget_tokens, ev.ts, ev.task_id);
+      break;
     case "stage.transition":
       db.prepare("UPDATE stages SET state=?, updated_at=?, started_at=COALESCE(?, started_at), ended_at=COALESCE(?, ended_at) WHERE stage_id=?")
         .run(p.to, ev.ts, p.to === "running" ? ev.ts : null, p.to === "done" ? ev.ts : null, p.stage_id);
@@ -287,6 +295,41 @@ export function applyEvent(db, ev) {
     case "backlog.decided":
       db.prepare("UPDATE backlog SET status=?, decided_by=?, decided_at=? WHERE id=?")
         .run(p.status, p.by ?? null, ev.ts, p.id);
+      break;
+    // ---- 阶段负责人：谁盯这个阶段。分发不是发通知，是账本里换人。 ----
+    case "stage.owner.assigned":
+      db.prepare("UPDATE stages SET owner=?, updated_at=? WHERE stage_id=?").run(p.owner ?? null, ev.ts, p.stage_id);
+      break;
+    // 复议会改边界/预算：目标一旦签字就不能悄悄变，必须留下 patch 事件。
+    case "stage.patched": {
+      const cur = db.prepare("SELECT * FROM stages WHERE stage_id=?").get(p.stage_id);
+      if (!cur) break;
+      const globs = p.allowed_globs ? JSON.stringify(p.allowed_globs) : cur.allowed_globs;
+      const nonGoals = p.non_goals ? JSON.stringify(p.non_goals) : cur.non_goals;
+      db.prepare("UPDATE stages SET allowed_globs=?, non_goals=?, goal=COALESCE(?, goal), updated_at=? WHERE stage_id=?")
+        .run(globs, nonGoals, p.goal ?? null, ev.ts, p.stage_id);
+      break;
+    }
+    // ---- 团队共享记忆：append-only，只加不改（改就是新的一条）。 ----
+    case "memory.added":
+      db.prepare("INSERT OR REPLACE INTO memory (memory_id,project_id,kind,text,source,by,created_at) VALUES (?,?,?,?,?,?,?)")
+        .run(p.memory_id, p.project_id, p.kind, p.text, p.source ?? null, p.by ?? null, ev.ts);
+      break;
+    // ---- 复议会：触发是机械的，拍板是人做的，决议必须落成一条记忆。 ----
+    case "decision.requested":
+      db.prepare("INSERT OR REPLACE INTO decisions (decision_id,project_id,stage_id,trigger,status,proposal,options,evidence,created_at) VALUES (?,?,?,?,?,?,?,?,?)")
+        .run(p.decision_id, p.project_id, p.stage_id ?? null, p.trigger, "open", p.proposal ?? null, JSON.stringify(p.options || []), JSON.stringify(p.evidence || []), ev.ts);
+      break;
+    case "decision.resolved":
+      db.prepare("UPDATE decisions SET status='resolved', choice=?, by=?, note=?, resolved_at=? WHERE decision_id=?")
+        .run(p.choice, p.by ?? null, p.note ?? null, ev.ts, p.decision_id);
+      break;
+    case "asset.proposed":
+      db.prepare("INSERT OR REPLACE INTO assets (asset_id,project_id,kind,title,path,status,created_at) VALUES (?,?,?,?,?,'proposed',?)")
+        .run(p.asset_id, p.project_id, p.kind, p.title, p.path, ev.ts);
+      break;
+    case "asset.decided":
+      db.prepare("UPDATE assets SET status=?, by=? WHERE asset_id=?").run(p.status, p.by ?? null, p.asset_id);
       break;
     // 任务挂到阶段上。执行器据此拿边界去判护栏，不用在任务里冗余存阶段定义。
     case "task.scoped":

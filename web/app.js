@@ -571,7 +571,10 @@ async function loadHealth() {
 // 每个阶段有目标、产出物、边界（allowedGlobs）、不管什么（nonGoals）、以及配的专家 agent，
 // 阶段闸门在护栏里机械执行"不许发散"，越界就 FAIL 并把想法丢进 backlog 等人分流。
 let projects = [];
-const PROJ_LABEL = { drafting: "待开会", proposed: "待签字", running: "进行中", done: "已交付" };
+const PROJ_LABEL = { drafting: "待开会", proposed: "待签字", running: "进行中", settling: "待签收资产", done: "已交付" };
+const MEM_LABEL = { decision: "决定", constraint: "约束", pitfall: "踩坑", interface: "接口" };
+const TRIGGER_LABEL = { scope: "越界", contract: "契约变更", baseline: "回归连挂", size: "体量过大", budget: "预算七成" };
+let mineOnly = false;
 const STAGE_LABEL = { proposed: "待签", approved: "已签", running: "在跑", done: "已交付", blocked: "卡住" };
 const STAGE_CLS = { proposed: "wait", approved: "ok", running: "run", done: "done", blocked: "bad" };
 const LANE_LABEL = { feature: "功能", chore: "杂活" };
@@ -579,7 +582,7 @@ const LANE_LABEL = { feature: "功能", chore: "杂活" };
 function stageChip(p, s) {
   const cur = s.state === "running" || (p.state === "running" && s.state === "approved");
   const tip = "阶段 " + s.seq + " · " + s.name + " · " + (STAGE_LABEL[s.state] || s.state) +
-    (s.task_id ? " · 任务 " + s.task_id : "");
+    " · 负责人 " + (s.owner || "未指派") + (s.task_id ? " · 任务 " + s.task_id : "");
   return '<span class="stg st-' + (STAGE_CLS[s.state] || "wait") + (cur ? " cur" : "") + '" title="' + esc(tip) + '">' +
     s.seq + " " + esc(s.name) + "</span>";
 }
@@ -606,6 +609,12 @@ function stageDetail(p, s) {
   bits.push('<div class="goal">' + esc(s.goal) + "</div>");
   bits.push('<div class="row mono dim">产出物 ' + (s.artifacts.length ? esc(s.artifacts.join("、")) : "（无，交付物就是 diff + 测试）") + "</div>");
   bits.push('<div class="row mono dim">边界 ' + (s.allowedGlobs.length ? esc(s.allowedGlobs.join("、")) : "不限制") + "</div>");
+  // 分发不是界面标签：换人要走账本（stage.owner.assigned），所以这里是一个动作而不是一段文字。
+  bits.push('<div class="row dim">负责人 <b>' + esc(s.owner || "未指派") + "</b>" +
+    ((isLead() || p.owner === ME) && p.state !== "done"
+      ? ' <button class="ghost" onclick="assignOwner(\'' + p.id + "','" + s.stage_id + '\')">换人</button>'
+      : "") +
+    (s.owner ? "" : "（指派后「只看我盯的」才筛得到）") + "</div>");
   if (s.nonGoals && s.nonGoals.length) bits.push('<div class="row mono dim">不做 ' + esc(s.nonGoals.join("、")) + "</div>");
   if (s.task_id) bits.push('<div class="row dim">任务 <span class="mono">' + esc(s.task_id) + "</span></div>");
   return '<div class="stage">' + bits.join("") + "</div>";
@@ -666,6 +675,58 @@ function startBlock(p) {
   return out.join("");
 }
 
+// 复议会：执行中撞上签字时没料到的岔路口，机器把选项摆好，人只拍板。
+// 每一张都必须能机械执行（扩边界/加预算/打回），否则「拍板」只是给界面换颜色。
+function meetingBlock(p) {
+  const open = (p.decisions || []).filter((d) => d.status === "open");
+  if (!open.length) return "";
+  return '<div class="meet"><div class="row"><b>复议会</b><span class="badge bad">' + open.length +
+    ' 张等你拍板</span><span class="dim">机器已经把现状与路线写在提案里，你只需要选一条</span></div>' +
+    open.map((d) => '<div class="dec">' +
+      '<div class="row"><span class="badge wait">' + esc(TRIGGER_LABEL[d.trigger] || d.trigger) + "</span>" +
+      '<span class="dim">' + esc(String(d.created_at || "").slice(0, 16).replace("T", " ")) + " · 卡住的执行已暂停" + "</span></div>" +
+      '<details class="prop"><summary>看机器提案（现状 / 可选路线 / 建议）</summary><pre>' + esc(d.proposal || "") + "</pre></details>" +
+      '<div class="row">' + (d.options || []).map((o) =>
+        '<button class="' + (o.id === "abort" ? "ghost" : "primary") + '" title="' + esc(o.desc) + '" onclick="resolveMeeting(\'' +
+        p.id + "','" + d.decision_id + "','" + o.id + '\')">' + esc(o.label) + "</button>").join("") +
+      "</div></div>").join("") + "</div>";
+}
+
+// 项目记忆：全团队共享的结论，不是聊天记录。只加不改；要推翻就写一条新的。
+function memoryBlock(p) {
+  const mem = p.memory || [];
+  if (!mem.length && p.state === "drafting") return "";
+  const recent = mem.slice(-6);
+  return '<div class="mem"><div class="row"><b>项目记忆</b><span class="dim">' + mem.length + " 条 · 全团队共享 · agent 每次调用只带最近 8 条 + 按角色召回 5 条</span>" +
+    (ME && ROLE !== "viewer" ? '<button class="ghost" onclick="addMemory(\'' + p.id + '\')">＋ 记一条</button>' : "") + "</div>" +
+    (recent.length
+      ? '<ul>' + recent.map((m) => '<li><span class="badge">' + esc(MEM_LABEL[m.kind] || m.kind) + "</span> " +
+        esc(m.text) + '<span class="dim">（' + esc(m.source || "?") + "）</span></li>").join("") + "</ul>"
+      : '<div class="row dim">还没有记忆：阶段交付时会自动攒下决定/约束/踩坑/接口，人也可以手工补。</div>') +
+    (mem.length > recent.length ? '<div class="row dim">还有 ' + (mem.length - recent.length) + " 条更早的（收尾时会导出成 memory.md）</div>" : "") +
+    "</div>";
+}
+
+// 收尾资产：第 3 次（也是最后一次）签字。收下 = 下次能直接用；不要 = 这次没有可复用的东西，不丢人。
+function settleBlock(p) {
+  if (p.state !== "settling") return "";
+  const assets = p.assets || [];
+  const files = ["postmortem.md", "decisions.md", "memory.md", "workflow.json", "contract-template.md"];
+  return '<div class="settle"><div class="row"><b>收尾沉淀包</b><span class="badge wait">待签收</span>' +
+    '<span class="dim">全部从账本生成（不花 token）：' + esc(files.join(" / ")) + "</span></div>" +
+    (assets.length
+      ? '<ul>' + assets.map((a) => '<li><span class="badge">' + esc(a.kind) + "</span> " + esc(a.title) +
+        '<span class="dim mono">' + esc(a.path) + "</span>" +
+        (a.status === "proposed"
+          ? '<span class="acts"><button class="primary" onclick="settleAsset(\'' + p.id + "','" + a.asset_id + "','accepted" + '\')">收下</button>' +
+            '<button class="ghost" onclick="settleAsset(\'' + p.id + "','" + a.asset_id + "','declined" + '\')">不要</button></span>'
+          : '<span class="acts dim">' + (a.status === "accepted" ? "已收下" : "不要了") + "</span>") +
+        "</li>").join("") +
+        "</ul>"
+      : '<div class="row dim">收尾还没跑完：执行器 3 秒内会补跑（进程崩了也不怕，settling 是持久状态）。</div>') +
+    "</div>";
+}
+
 function projCard(p) {
   const stages = p.stages || [];
   const groups = signatureGroups(p);
@@ -687,20 +748,31 @@ function projCard(p) {
     (stages.length ? '<details class="pbody"><summary>展开：每个阶段的目标 / 产出物 / 边界 / 专家</summary>' +
       stages.map((s) => stageDetail(p, s)).join("") + "</details>" : "") +
     backlogBlock(p) +
+    meetingBlock(p) +
     (p.state === "drafting" ? '<div class="row"><button class="primary" onclick="meetProject(\'' + p.id + '\')">开预备会（机器先开会，人之后再来看）</button></div>' : "") +
-    (p.state !== "done" ? gatesBlock(p) + startBlock(p) : "") +
+    (p.state === "settling" ? settleBlock(p) : p.state !== "done" ? gatesBlock(p) + startBlock(p) : "") +
+    memoryBlock(p) +
     "</div>";
 }
 
 function renderProjects() {
   const box = el("projects");
   if (!box) return;
-  const active = projects.filter((p) => p.state !== "done");
-  const done = projects.filter((p) => p.state === "done");
+  // 每人只盯自己那几关：阶段负责人是我，或者项目是我发起的。多人同时看十几个项目时才不会互相淹。
+  const mine = (p) => p.owner === ME || (p.stages || []).some((s) => s.owner === ME);
+  const visible = mineOnly ? projects.filter(mine) : projects;
+  const active = visible.filter((p) => p.state !== "done");
+  const done = visible.filter((p) => p.state === "done");
+  const hidden = projects.length - visible.length;
   const html = active.map(projCard).join("") +
     (done.length ? '<details class="pdone"><summary>已交付的项目 ' + done.length + " 个</summary>" + done.map(projCard).join("") + "</details>" : "");
-  box.innerHTML = html || '<div class="empty">还没有项目。功能类工作从这里开：机器先开预备会，你只需要签 2 次字。</div>';
+  box.innerHTML = (html || '<div class="empty">' + (mineOnly
+    ? "没有你盯的项目。关掉「只看我盯的」能看到全部（阶段负责人可以在展开详情里改）。"
+    : "还没有项目。功能类工作从这里开：机器先开预备会，你只需要签 2 次字。")) +
+    (mineOnly && hidden ? '<div class="row dim">已隐藏 ' + hidden + " 个不归你盯的项目</div>" : "");
   el("n-proj").textContent = active.length;
+  const btn = el("mine-btn");
+  if (btn) { btn.textContent = mineOnly ? "看全部项目" : "只看我盯的"; btn.classList.toggle("on", mineOnly); }
 }
 
 async function loadProjects() {
@@ -713,7 +785,9 @@ async function loadProjects() {
       try {
         const d = await api("/api/projects/" + encodeURIComponent(p.id));
         if (!d.ok) return p;
-        return (await d.json()).project || p;
+        const j = await d.json();
+        // 详情接口带回记忆/复议会/资产：看板要靠它们渲染，不能只取 project 丢掉。
+        return j.project ? { ...j.project, memory: j.memory || [], decisions: j.decisions || [], assets: j.assets || [] } : p;
       } catch { return p; }
     }));
     renderProjects();
@@ -741,6 +815,66 @@ window.signGroup = async function (id, group) {
   if (!r.ok) { alert(j.error || "签字失败"); return; }
   await loadProjects();
   await loadFeed();
+};
+
+// 换阶段负责人：领了就要盯着看板，所以这是账本动作而不是标签。
+window.assignOwner = async function (id, stageId) {
+  const who = prompt("把这一阶段指派给谁？（填团队里的名字，留空取消）");
+  if (!who || !who.trim()) return;
+  const r = await api("/api/projects/" + id + "/stages/" + encodeURIComponent(stageId) + "/owner", {
+    method: "POST", body: JSON.stringify({ owner: who.trim() }),
+  });
+  const j = await r.json();
+  if (!r.ok) { alert(j.error || "指派失败"); return; }
+  await loadProjects();
+  await loadFeed();
+};
+
+// 复议会拍板：每个选项都是机械可执行的（扩边界/加预算/打回），note 会进决议与项目记忆。
+window.resolveMeeting = async function (id, did, choice) {
+  const opt = { extend_scope: "扩边界", next_stage: "留到下一阶段", amend: "接受契约变更", revert: "退回契约原文", fix: "先修，继续重试", accept_risk: "接受风险继续", split: "拆小重做", continue: "继续", raise_budget: "加预算", stop: "不加", abort: "人工接手" }[choice] || choice;
+  const note = prompt("拍板：" + opt + "\n写一句理由（会进账本和项目记忆，可留空）", "");
+  if (note === null) return;
+  const r = await api("/api/projects/" + id + "/decisions/" + encodeURIComponent(did), {
+    method: "POST", body: JSON.stringify({ choice, note }),
+  });
+  const j = await r.json();
+  if (!r.ok) { alert(j.error || "拍板失败"); return; }
+  await loadProjects();
+  await load();
+  await loadFeed();
+};
+
+// 人往项目记忆里补一条：agent 不会自己总结自己，人的结论最值钱。
+window.addMemory = async function (id) {
+  const text = prompt("记一条（一句能被下一个 agent 直接照做的话，200 字内）");
+  if (!text || !text.trim()) return;
+  const kind = prompt("类型：decision 决定 / constraint 约束 / pitfall 踩坑 / interface 接口", "decision");
+  if (kind === null) return;
+  const r = await api("/api/projects/" + id + "/memory", {
+    method: "POST", body: JSON.stringify({ kind: kind.trim() || "decision", text: text.trim(), source: "人工补充" }),
+  });
+  const j = await r.json();
+  if (!r.ok) { alert(j.error || "写入失败"); return; }
+  await loadProjects();
+  await loadFeed();
+};
+
+// 资产签收：收下 = 下次能直接套用；不要 = 这次没有可复用的东西（也允许）。
+window.settleAsset = async function (id, assetId, status) {
+  const note = prompt(status === "accepted" ? "收下这个资产（可写一句用途，留空也行）" : "不要它（可写一句原因，留空也行）", "");
+  if (note === null) return;
+  const body = status === "accepted" ? { accept: [assetId], note } : { decline: [assetId], note };
+  const r = await api("/api/projects/" + id + "/assets", { method: "POST", body: JSON.stringify(body) });
+  const j = await r.json();
+  if (!r.ok) { alert(j.error || "签收失败"); return; }
+  await loadProjects();
+  await loadFeed();
+};
+
+window.toggleMine = function () {
+  mineOnly = !mineOnly;
+  renderProjects();
 };
 
 window.startStage = async function (id, ref) {

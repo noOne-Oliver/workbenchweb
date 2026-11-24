@@ -4,7 +4,7 @@ import { ROLES } from "./users.mjs";
  * 权限矩阵。所有动作在服务端判一次，前端只是不显示按钮——能绕过 UI 的才叫身份。
  * 返回 { ok, error?, self_approved? }，错误文案直接给人看。
  */
-export function can(user, action, task = null) {
+export function can(user, action, task = null, project = null) {
   if (!user) return { ok: false, error: "未登录" };
   if (!ROLES.includes(user.role)) return { ok: false, error: "角色未知: " + user.role };
   if (action === "view") return { ok: true };
@@ -65,7 +65,23 @@ export function can(user, action, task = null) {
     case "create_project":
     case "meet_project":
     case "decide_backlog":
+    case "add_memory":
       return { ok: true };
+
+    // 分发：lead 可以把阶段指派给任何人；项目 owner 只能指派自己的项目。
+    case "assign_stage_owner": {
+      if (lead) return { ok: true };
+      if (project && project.owner === user.name) return { ok: true };
+      return { ok: false, error: "只有 lead 或项目发起人能调整阶段负责人" };
+    }
+
+    // 拍板必须落在一个人头上。lead 拍，账本记名字；member 可以提意见（backlog）但不能拍板。
+    case "resolve_decision":
+      return lead ? { ok: true } : { ok: false, error: "只有 lead 能在复议会上拍板" };
+
+    // 资产入库是第 3 次签字：只在真有可复用资产时发生。
+    case "settle_assets":
+      return lead ? { ok: true } : { ok: false, error: "只有 lead 能签收资产" };
 
     case "start_stage": {
       if (!task) return { ok: true };
