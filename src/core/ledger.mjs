@@ -19,7 +19,8 @@ export const TRANSITIONS = {
   implementing:      ["verifying", "queued", "blocked", "failed"],
   // queued = 快路径没过、需要先补方案（见 worker.doVerify）
   verifying:         ["reviewing", "implementing", "queued", "blocked", "failed"],
-  reviewing:         ["awaiting_review", "implementing", "blocked", "failed"],
+  // queued = Reviewer 调用失败（超时/限流）时回队列重跑，别把任务卡死在 reviewing
+  reviewing:         ["awaiting_review", "implementing", "queued", "blocked", "failed"],
   awaiting_review:   ["awaiting_approval", "queued", "blocked", "failed"],
   awaiting_approval: ["merging", "queued", "failed"],
   awaiting_human:    ["awaiting_approval", "merging", "queued", "failed"],

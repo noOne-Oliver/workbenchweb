@@ -9,7 +9,7 @@
 
 其余全部自动重试、自动升级、自动归档、自动合并 —— 人不是值班员，是签字的人。
 
-`Node.js ≥ 22.5` · `MIT` · `npm test` 90 项全过 · 默认 `mock` 引擎零成本 · 一台机器当 runner，其他人用浏览器
+`Node.js ≥ 22.5` · `MIT` · `npm test` 123 项全过 · 默认 `mock` 引擎零成本 · 一台机器当 runner，其他人用浏览器 · 可打成离线单包（自带 node + 引擎）
 
 > 仓库分工：这里只有 **Web 版**（内核 + 服务端 + 浏览器界面）。macOS 桌面版（把同一套内核打包成 `.app`）在 [noOne-Oliver/workbench](https://github.com/noOne-Oliver/workbench)，两边**不共享任何文件**。
 
@@ -287,7 +287,7 @@ AI 写代码的工具已经很多了，**能无人值守跑一天的很少**。�
 5. **角色先于人、后于 agent**：`AGENT_FOR_ROLE` 把 designer / architect / coder / integrator 映射到具体 agent（`src/core/workflows.mjs`）；现在人当角色，之后换 Agent 只改一张表。
 6. **阶段是任务的容器，不是另一套执行器**：开工时 `startStage` 只是建一个普通 task 并打上 `stage_id`，租约 / 预算 / 护栏 / 两段评审全部复用 —— 没有第二条执行路径可以偷偷退化。
 
-实测（不需要模型，5 秒）：`npm run demo:stage` → 31 项检查全过，4 阶段跑完 + 2 次签字 + 1 个反例（agent 在设计阶段顺手改实现，被 `stage_scope` 打回、任务 `blocked`、越界文件自动落 backlog）；报告落 `docs/stage-demo.json`（固定文件名，每次覆盖，已 gitignore）。
+实测（不需要模型，5 秒）：`npm run demo:stage` → 41 项检查全过，4 阶段跑完 + 2 次签字 + 1 个反例（agent 在设计阶段顺手改实现，被 `stage_scope` 打回、任务 `blocked`、越界文件自动落 backlog）；报告落 `docs/stage-demo.json`（固定文件名，每次覆盖，已 gitignore）。
 
 ---
 ## 五、界面长什么样
@@ -306,7 +306,7 @@ AI 写代码的工具已经很多了，**能无人值守跑一天的很少**。�
 
 ## 六、快速部署
 
-三种路径，按你要的「真」程度选。**建议先走 A（30 秒）确认界面对不对，再走 B。**
+四种路径，按你要的「真」程度选。**建议先走 A（30 秒）确认界面对不对，再走 B；内网 / 私有云走 D。**
 
 ### 路径 A：30 秒看效果（假引擎，零成本，不碰真模型）
 
@@ -406,6 +406,55 @@ npm run web:logs     # 跟 server + worker 日志（--follow）
 npm run web:stop     # SIGTERM，8 秒不退再 SIGKILL
 ```
 
+### 路径 D：私有云 / 内网离线单包（目标机没有 node、不能联网装依赖）
+
+**这条路径回答的是「内网没有 opencode、也没有 npm，怎么部署」**：把一个自带 node 运行时、自带内核、自带 `opencode` 引擎二进制的 tar.gz 搬进去，安装和启动都不联网。模型走内网 OpenAI 兼容端点——**离线安装不等于离线推理**。
+
+```bash
+# 在能联网的构建机上（一次）：
+node scripts/bundle.mjs --target linux-x64        # 私有云默认；本机开发用 --target darwin-arm64
+node scripts/bundle.mjs --target linux-x64 --skip-download   # 已缓存二进制时，完全离线组装
+
+# 目标机（不需要 node，不需要 npm）：
+tar -xzf workbench-linux-x64.tar.gz && cd workbench-linux-x64
+sudo ./install.sh                                  # 解到 /opt/workbench，装 systemd unit，建 /usr/local/bin/wb
+sudo vi /etc/workbench/workbench.env               # 三行：WB_LLM_BASE_URL / WB_LLM_MODEL / WB_LLM_API_KEY
+wb doctor                                          # 硬失败 exit 2，并指出该改哪个文件
+wb up                                              # 起 server + worker，等 /api/health
+```
+
+浏览器打开 `http://<主机>:7317/`，首次口令在 `wb logs | grep 一次性口令`。
+
+包里的东西（`scripts/bundle.mjs` 组装，52 个文件）：
+
+| 组件 | 说明 |
+| --- | --- |
+| `bin/node` | 官方 Node 22 运行时；目标机不需要预装 node |
+| `bin/wb` | 运维台：`doctor` / `up` / `down` / `status` / `logs` / `workspace` |
+| `kernel/` | 本仓库的 `src` + `web` + `package.json`（不含 `data/`、`tests/`、`.git`） |
+| `engine/opencode` | opencode 单文件二进制（当前 1.19.6），放在 `<WB_CODE>/../engine/opencode`，内核自动找到 |
+| `install.sh` / `uninstall.sh` | 离线安装（先用包内 node 校验 `SHA256SUMS`）/ 卸载（默认保留工作区） |
+| `licenses/` + `SHA256SUMS` + `VERSIONS` | MIT / Apache-2.0 / NOTICE、全量校验、版本清单 |
+
+**验收不是「装上了」，是「六件事都对」**（`scripts/verify-bundle.mjs` 把包解到临时前缀，用包内 node 真跑）：
+
+```bash
+node scripts/verify-bundle.mjs --target darwin-arm64   # 本机实测全绿：96.9 MB
+```
+
+| # | 断言 |
+| --- | --- |
+| 1 | 包内没有 `data/`、`.git`、`tests/`、`scripts/`、`node_modules` 等不该带的东西 |
+| 2 | 权限正确（`bin/wb` 可执行、`provider.env` 600） |
+| 3 | `wb doctor` 退出 0、无 `[FAIL]`、报出包内 node 版本 |
+| 4 | `wb up` 真起 server + worker，`/api/health` 可用 |
+| 5 | 提交任务 → mock 第一轮伪绿被护栏拦下 → 第二轮通过 → 到 `awaiting_review`；账本里有 `to=verifying` 迁移、护栏 6 项、token 花费 |
+| 6 | `wb down` 两个进程都停、端口关闭、pid 文件清理 |
+
+实测：darwin-arm64 包 **96.9 MB**（node 22.23.5 + opencode 1.19.6），验收 `VERIFY OK`；linux-x64 包 **123.9 MB** 已产出，但**本机是 macOS，没法在 darwin 上验收 Linux 包**——这条要在目标私有云机器上跑一次同样的 `verify:bundle`，不要拿「包生成了」当「能跑」。
+
+> 已知限制：Linux 包要求 glibc（内嵌引擎是 Bun 单文件，依赖 NSS/DNS 符号），musl/Alpine 不支持；`data/` 与业务仓库在运行时才建；模型端点必须可达。详见包内 `README-OFFLINE.md`。
+
 ### 接真引擎（可选，会花 token）
 
 默认 `mock` 只验证链路。要真写代码，得让 provider 调本机的 [opencode](https://github.com/sst/opencode)：
@@ -447,7 +496,7 @@ WB_ENGINE=opencode WB_MODEL=<provider/model> WB_BUDGET=1000000 WB_ROOT=~/Workben
 
 ## 七、实测数字（真引擎，不粉饰）
 
-配置：opencode + `gptagent/deepseek-v4.1-flash`，同一套任务、同一台 M 系列 Mac。
+配置：opencode + `gptagent/deepseek-v4.1-flash`，同一套任务、同一台 M 系列 Mac；⑤ 换自研 builtin 引擎跑同一套任务做对照。
 
 ### ① 真引擎整单（两段评审跑到底）
 
@@ -512,6 +561,30 @@ WB_ENGINE=opencode WB_MODEL=<provider/model> WB_BUDGET=1000000 WB_ROOT=~/Workben
 | 收尾 | 四阶段交付完项目进 `settling`（不是直接 done），从账本生成 5 份沉淀文件 + 2 个可复用资产；签收后 done；总签字 2 次；人估算 10 分钟 |
 | 界面三步真点 | 无头浏览器点「下一阶段做」→「签 A 组」→「开工 1 设计」：状态变「进行中」、出现「已签 A 组（设计+契约）· lead0：…」、任务卡 3→4、开工按钮消失、没有弹错误（`npm run shot:projects`） |
 
+### ⑤ 自研 builtin 引擎：同一套 5 单，不用 opencode
+
+`WB_ENGINE=builtin`（只给一个 OpenAI 兼容端点，不装 opencode）跑 ②③ 里的同一套 5 单，模型仍是 `deepseek-v4.1-flash`，预算 1,500,000/单：
+
+| 任务 | 体量 | token（builtin） | token（opencode） | 机器秒（builtin） | 机器秒（opencode） |
+| --- | --- | --- | --- | --- | --- |
+| slugify | small | 47,118 | 210,118 | 62 | 48 |
+| median | small | 61,337 | 212,781 | 68 | 46 |
+| merge-utils | normal | 332,946 | 417,776 | 235 | 97 |
+| truncate-long | normal | 475,655 | 611,112 | 441 | 172 |
+| refactor-range | large | 1,209,331 | 622,392 | 754 | 186 |
+| **合计 / 平均** | — | **2,126,387 / 425,277** | **2,074,179 / 414,836** | **平均 312s** | **平均 110s** |
+
+5/5 一次过、attempts 全 1、护栏 6/6（合并后 main 上 84 条用例全绿）。按角色 token：coder 497,594、verifier 668,209、reviewer 732,418、architect 161,524、lead 66,642。
+
+**怎么读：总账差不多，分布完全不同。**
+
+1. **小活 builtin 便宜得多**：slugify / median 从 21 万降到 4.7~6.1 万（−78% / −71%）——它的 harness 比 opencode 小，工具往返更省。代价是慢 30~50%。
+2. **大活 builtin 明显更贵更慢**：refactor-range 是 120.9 万 / 754 秒，opencode 是 62.2 万 / 186 秒（+94% token、+305% 时间）。builtin 没有子 agent、靠 40 步内自己摸索，重构这种活步数会炸。
+3. 所以「内网只有端点」时，**小改动直接 builtin，大重构要么给 builtin 加子 agent/阶段拆分，要么在能装 opencode 的机器上跑**。这不是引擎好坏，是任务形状与工具形状的匹配问题。
+4. 复核命令：`WB_ENGINE=builtin WB_LLM_BASE_URL=... WB_LLM_MODEL=... WB_LLM_API_KEY=... npm run bench:real -- --fresh --tasks 5`（约 26 分钟、约 213 万 token）。
+
+报告：`docs/bench-real-2026-11-24T17-07-16-523Z.json`。
+
 ---
 
 ## 八、人到底要做什么
@@ -550,19 +623,25 @@ node src/cli.mjs up                              # 起整套（server + 看护�
 node src/cli.mjs user add|passwd|role|disable|enable|list
 npm run web | web:status | web:logs | web:stop   # 进程管理
 node src/cli.mjs project new|list|show|meet|sign|start|backlog   # 项目 = 阶段链
-npm run demo:stage                               # 阶段链端到端演示（31 项检查，5 秒，零成本）
+npm run demo:stage                               # 阶段链端到端演示（41 项检查，5 秒，零成本）
 npm run shot:projects                             # 重新生成 docs/projects.png + projects-meeting.png，并真点一遍界面（需要本机 Chrome）
 npm run demo:reset                               # demo 仓库恢复到种子状态
 npm run docs:diagrams                            # 重新生成 docs/arch.svg · flow.svg · cost.svg
 npm run shots                                    # 重新生成界面截图（需要本机 Chrome）
-npm test                                         # 内核测试（90 项）
+npm run bundle:linux                             # 打私有云离线包 → dist/workbench-linux-x64.tar.gz
+npm run bundle:darwin                            # 打 macOS 开发包（本机验收用）
+npm run verify:bundle                            # 把包解到临时前缀，真起服务、真跑任务、真收工
+npm test                                         # 内核测试（123 项）
 ```
 
 ### 环境变量
 
 | 变量 | 默认 | 说明 |
 | --- | --- | --- |
-| `WB_ENGINE` | `mock` | `mock` 假引擎；`opencode` 真引擎 |
+| `WB_ENGINE` | `mock` | `mock` 假引擎；`opencode` 真引擎；`builtin` 自研 loop（只要 OpenAI 兼容端点） |
+| `WB_ENGINE_BIN` | 空 | 指定 opencode 二进制路径（离线包自动用 `<WB_HOME>/engine/opencode`） |
+| `WB_LLM_BASE_URL` / `WB_LLM_API_KEY` / `WB_LLM_MODEL` | 空 | `builtin` 引擎（以及打包后 opencode）用的 OpenAI 兼容端点三件套 |
+| `WB_BUILTIN_READ_ROOTS` | `WB_ROOT` | `builtin` 只读根（冒号分隔）；写永远只允许任务 worktree |
 | `WB_DB` | `data/ledger.db` | 账本路径 |
 | `WB_TOKEN` | 空 | 脚本通道（curl/CI），记 `by=cli`；浏览器仍走名字 + 口令 |
 | `WB_PORT` / `WB_HOST` | `7317` / `127.0.0.1` | 监听地址（多人用改 `0.0.0.0`） |
@@ -598,6 +677,31 @@ npm test                                         # 内核测试（90 项）
 | 报错时**不退出** | 实测挂 13 分钟、stdout 0 字节 | 盯它自己的日志文件，命中限流/额度/鉴权字样立刻 SIGKILL |
 | 空产出但 exit 0 | 看起来「干完了」，其实什么都没做 | 文本为空即判失败，绝不当成功 |
 | 规划阶段读工作区被拒 | `PermissionRejectedError`，整轮只剩工具调用 → 被当空产出重试，57 秒烧 22.5 万 token | ① 生成 `permission-overlay.json` 只读放行工作区根 ② 权限拒绝归类为**确定性失败**直接 `blocked`，不再重试 ③ 原始事件落盘 `logs/fail-*.jsonl`（留最近 5 个） |
+
+### 自研引擎 builtin：内网只给一个 OpenAI 兼容端点时也能跑
+
+opencode 很强，但它是「一整套客户端」：90 MB 二进制、自己的鉴权与配置目录、出错时不退出、要扫日志才能判断死活。内网私有云场景里这些都会变成部署摩擦。所以有第二条引擎路：`src/runner/providers/builtin.mjs`，**不依赖 opencode、不装任何 npm 包**，直接打 `${WB_LLM_BASE_URL}/chat/completions`。
+
+| 机制 | 做法 |
+| --- | --- |
+| 工具 | `read_file` / `write_file` / `list_files` / `grep` / `run_command`（`bash -lc`，默认 120 秒） |
+| 步数 / 时长 | 默认 40 步、墙钟 900 秒、空闲 180 秒；超时 `AbortController` 掐断 |
+| 重试 | 429 / 500 / 502 / 503 / 504 退避重试 2 次；4xx 直接判**确定性失败**，不空转 |
+| 越权 | 写只允许任务 worktree；读只允许 `WB_BUILTIN_READ_ROOTS`（默认 `WB_ROOT`），`realpath` 防符号链接逃逸 |
+| 泄密 | `run_command` 子进程环境剔除 `*KEY/*TOKEN/*SECRET/*PASSWORD`；日志不打印 apiKey |
+| token | 累加 `usage.total_tokens`（端点不返回时按字符估），照常写账本与预算熔断 |
+
+```bash
+WB_ENGINE=builtin \
+WB_LLM_BASE_URL=https://llm.internal.example/v1 \
+WB_LLM_MODEL=qwen3-coder-30b \
+WB_LLM_API_KEY=sk-... \
+node scripts/engine-smoke.mjs "只回复两个字：可用"
+```
+
+**它和 opencode 走同一条 worker 流水线、同一套护栏**——引擎只是「角色的一次调用」，换引擎不会绕过测试、回归基线、同义反复检查、两段评审。这也是敢把它当兜底的原因：**降级的是引擎，不是验收标准。**
+
+> 代价：没有 MCP / 子 agent / LSP，复杂任务不如 opencode；它的定位是「内网只能给一个端点」和「opencode 坏掉时还能干活」。
 
 ### 界面上的按钮，也要从人手指那一下测起
 
@@ -654,12 +758,16 @@ src/core/     账本、事件、状态机、租约、工作区、活动流、体
               项目/阶段链（stages.mjs）、工作流模板（workflows.mjs）、glob 边界（glob.mjs）、
               项目记忆（memory.mjs）、复议会（meetings.mjs）、收尾资产（retro.mjs）
 src/runner/   worker 循环、SOP 提示词、护栏（含回归基线 + 阶段闸门）、worktree、引擎 provider
-              （`stage` = 确定性按阶段产出，演示与截图都用它，不联网）
+              （`stage` = 确定性按阶段产出；`mock` = 假引擎；`opencode` = 真引擎；
+               `builtin` = 自研 OpenAI 兼容 loop，只要一个端点就能跑）
 src/server/   HTTP + 静态审阅界面 + 登录/权限/两段评审 API
 web/          审阅收件箱（三栏 / 新建任务 / 按文件分组 diff / 测试清单 / 全屏原始输出 / 活动流）
+bin/wb        离线包运维台（doctor/up/down/status/logs/workspace），POSIX sh，无依赖
+packaging/    离线包安装脚本、卸载脚本、配置样例、包内 README、许可证
 sandbox/demo/ 演示用目标仓库（有真测试，能真跑）
-tests/        内核测试（101 项）
-scripts/      启动器、demo 重置 / 重试 / 阶段链演示、引擎体检、真引擎基准、截图与配图
+tests/        内核测试（123 项）
+scripts/      启动器、demo 重置 / 重试 / 阶段链演示、引擎体检、真引擎/ builtin 基准、
+              离线包组装（bundle.mjs）与验收（verify-bundle.mjs）、截图与配图
 ```
 
 ## 十四、怎么把它推出去（第一性原理）

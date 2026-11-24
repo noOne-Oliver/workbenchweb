@@ -127,3 +127,16 @@ test("创建者身份来自会话：createUser 后任务 owner 用它，不是�
   const t = createTask(db, { title: "x", repo: "/tmp/r", owner: "alice" });
   assert.equal(getTask(db, t.id).owner, "alice");
 });
+
+test("reviewing 阶段调用失败能回队列，不会把任务卡死", () => {
+  // 真实事故：builtin 引擎在 doReview 里超时，catch 想回 queued，但状态机不允许 reviewing→queued，
+  // 结果 worker 自己抛「非法迁移」退出，任务永远停在 reviewing 且没人再捡。
+  const db = freshDb();
+  const t = createTask(db, { title: "除法", repo: "/tmp/r", owner: "alice" });
+  transition(db, t.id, "planning", { actor: "w" });
+  transition(db, t.id, "implementing", { actor: "w" });
+  transition(db, t.id, "verifying", { actor: "w" });
+  transition(db, t.id, "reviewing", { actor: "w" });
+  assert.doesNotThrow(() => transition(db, t.id, "queued", { actor: "w", reason: "reviewer timeout" }));
+  assert.equal(getTask(db, t.id).state, "queued");
+});

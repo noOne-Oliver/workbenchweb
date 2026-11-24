@@ -20,6 +20,9 @@ import { BUILTIN_ENGINES } from "./providers/index.mjs";
 export { BUILTIN_ENGINES };
 
 export const ROOT = resolve(process.env.WB_ROOT || process.cwd());
+// builtin 引擎的只读根：规划/架构阶段 cwd 在 scratch 里，必须能读到工作区里的目标仓库。
+// 不显式设置时 builtin 只认 WB_ROOT；没导出 WB_ROOT 的场景（cli --dir）就补这一行。
+process.env.WB_BUILTIN_READ_ROOTS ||= ROOT;
 const WORKTREES = resolve(ROOT, "worktrees");
 const SCRATCH = resolve(ROOT, ".oc/scratch");
 const MAX_ATTEMPTS = Number(process.env.WB_MAX_ATTEMPTS || 3);

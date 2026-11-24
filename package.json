@@ -27,6 +27,9 @@
     "shot:roles": "node scripts/shot-roles.mjs",
     "shot:projects": "node scripts/shot-projects.mjs",
     "shots": "node scripts/shots.mjs",
-    "docs:diagrams": "node scripts/make-diagrams.mjs"
+    "docs:diagrams": "node scripts/make-diagrams.mjs",
+    "bundle:linux": "node scripts/bundle.mjs --target linux-x64",
+    "bundle:darwin": "node scripts/bundle.mjs --target darwin-arm64",
+    "verify:bundle": "node scripts/verify-bundle.mjs"
   }
 }

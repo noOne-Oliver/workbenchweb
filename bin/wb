@@ -1,0 +1,530 @@
+#!/bin/sh
+# wb —— 离线单包（workbench）的控制台。
+#
+#   wb doctor     体检：node / 引擎 / 工作区 / 端口 / LLM 配置 / sqlite / 磁盘
+#   wb version    包版本与组件版本
+#   wb up         后台起 server + worker，等 /api/health 通过
+#   wb down       SIGTERM 收 server + worker
+#   wb status     进程、端口、队列概览
+#   wb logs       看日志（--follow 跟踪）
+#   wb workspace  建/检查工作区（账本、worktrees、起始仓库）
+#
+# 全程不联网、不 npm install。配置按 WB_ENV_FILE -> /etc/workbench/workbench.env
+# -> <WB_HOME>/workbench.env 的顺序读；命令行环境变量（WB_*）优先于文件。
+set -u
+
+PROG=wb
+SELF_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+DEFAULT_HOME=$(CDPATH= cd -- "$SELF_DIR/.." && pwd -P)
+
+# 包内运行（<prefix>/bin/wb）或仓库里直接调试时 WB_HOME 就是上一级；否则退回 /opt/workbench。
+if [ -f "$DEFAULT_HOME/kernel/package.json" ] || [ -f "$DEFAULT_HOME/src/server/index.mjs" ]; then
+  WB_HOME=${WB_HOME:-$DEFAULT_HOME}
+else
+  WB_HOME=${WB_HOME:-/opt/workbench}
+fi
+
+ENV_FILE=""
+load_env() {
+  cand=""
+  if [ -n "${WB_ENV_FILE:-}" ]; then
+    cand=$WB_ENV_FILE
+  elif [ -r /etc/workbench/workbench.env ]; then
+    cand=/etc/workbench/workbench.env
+  elif [ -r "$WB_HOME/workbench.env" ]; then
+    cand=$WB_HOME/workbench.env
+  elif [ -r /opt/workbench/workbench.env ]; then
+    cand=/opt/workbench/workbench.env
+  fi
+  if [ -n "$cand" ] && [ -r "$cand" ]; then
+    ENV_FILE=$cand
+    set -a
+    # shellcheck disable=SC1090
+    if ! . "$cand"; then
+      printf '! 配置文件语法有问题，已忽略: %s\n' "$cand" >&2
+    fi
+    set +a
+  fi
+}
+load_env
+
+WB_HOME=${WB_HOME:-/opt/workbench}
+WB_WORKSPACE=${WB_WORKSPACE:-/var/lib/workbench}
+WB_PORT=${WB_PORT:-7317}
+WB_HOST=${WB_HOST:-0.0.0.0}
+WB_ENGINE=${WB_ENGINE:-opencode}
+WB_ROOT=${WB_ROOT:-$WB_WORKSPACE}
+WB_DB=${WB_DB:-$WB_WORKSPACE/data/ledger.db}
+WB_OC_HOME=${WB_OC_HOME:-$WB_WORKSPACE/.oc}
+# 仓库里直接跑（没有 kernel/ 子目录）时把 WB_CODE 指到仓库根，省得调试时来回设。
+if [ -z "${WB_CODE:-}" ]; then
+  if [ -f "$WB_HOME/kernel/package.json" ]; then
+    WB_CODE=$WB_HOME/kernel
+  elif [ -f "$WB_HOME/src/server/index.mjs" ]; then
+    WB_CODE=$WB_HOME
+  else
+    WB_CODE=$WB_HOME/kernel
+  fi
+fi
+
+STATE_DIR=$WB_WORKSPACE/.wb
+LOG_DIR=$STATE_DIR
+PID_DIR=$STATE_DIR
+KERNEL_SERVER=$WB_CODE/src/server/index.mjs
+KERNEL_WORKER=$WB_CODE/src/cli.mjs
+
+export WB_HOME WB_WORKSPACE WB_PORT WB_HOST WB_ENGINE WB_ROOT WB_DB WB_OC_HOME WB_CODE
+umask 077
+
+if [ -n "${WB_NODE:-}" ]; then
+  NODE=$WB_NODE
+elif [ -x "$WB_HOME/bin/node" ]; then
+  NODE=$WB_HOME/bin/node
+else
+  NODE=$(command -v node 2>/dev/null || true)
+fi
+ENGINE_BIN=${WB_ENGINE_BIN:-$WB_HOME/engine/opencode}
+
+say()  { printf '%s\n' "$*"; }
+ok()   { printf '[ok]   %-11s %s\n' "$1" "$2"; }
+warn() { printf '[warn] %-11s %s\n' "$1" "$2"; }
+bad()  { printf '[FAIL] %-11s %s\n' "$1" "$2"; }
+die()  { printf '✗ %s\n' "$*" >&2; exit 2; }
+
+usage() {
+  cat <<'EOF'
+用法: wb <命令> [选项]
+
+  doctor      体检（任一项硬失败 exit 2，并指出该改哪个文件）
+  version     版本
+  up          后台启动 server + worker，等 /api/health 通过
+  down        SIGTERM 停止 server + worker
+  status      进程与端口
+  logs [-f]   日志（-f 跟踪；-n N 指定行数，默认 80）
+  workspace   建/检查工作区
+
+配置: $WB_ENV_FILE -> /etc/workbench/workbench.env -> <WB_HOME>/workbench.env
+EOF
+}
+
+need_node() {
+  if [ -z "$NODE" ] || [ ! -x "$NODE" ]; then
+    die "找不到 node（包内 $WB_HOME/bin/node 或 PATH），先跑 wb doctor"
+  fi
+}
+
+ensure_dirs() {
+  mkdir -p "$WB_WORKSPACE" "$WB_ROOT" "$STATE_DIR" "$WB_OC_HOME" "$(dirname "$WB_DB")" 2>/dev/null || return 1
+  chmod 700 "$STATE_DIR" 2>/dev/null || true
+  mkdir -p "$WB_ROOT/worktrees" 2>/dev/null || true
+  return 0
+}
+
+pid_alive() {
+  [ -n "${1:-}" ] && [ "$1" -gt 0 ] 2>/dev/null && kill -0 "$1" 2>/dev/null
+}
+
+read_pid() {
+  f=$PID_DIR/$1.pid
+  [ -r "$f" ] || return 1
+  v=$(cat "$f" 2>/dev/null | tr -cd '0-9')
+  [ -n "$v" ] || return 1
+  printf '%s' "$v"
+}
+
+node_health() {
+  "$NODE" -e '
+    const http = require("http");
+    const req = http.get({ host: "127.0.0.1", port: Number(process.argv[1]), path: "/api/health", timeout: 1500 }, (res) => {
+      res.resume();
+      process.exit(res.statusCode === 200 ? 0 : 1);
+    });
+    req.on("error", () => process.exit(1));
+    req.on("timeout", () => { req.destroy(); process.exit(1); });
+  ' "$WB_PORT" 2>/dev/null
+}
+
+node_port_free() {
+  "$NODE" -e '
+    const net = require("net");
+    const s = net.createServer();
+    s.once("error", () => process.exit(1));
+    s.listen(Number(process.argv[1]), process.argv[2], () => s.close(() => process.exit(0)));
+  ' "$WB_PORT" "$WB_HOST" 2>/dev/null
+}
+
+node_engine_version() {
+  "$NODE" -e '
+    const { spawnSync } = require("child_process");
+    const r = spawnSync(process.argv[1], ["--version"], { timeout: 15000, encoding: "utf8" });
+    const out = String(r.stdout || "").trim() || String(r.stderr || "").trim();
+    if (r.status === 0 && out) { process.stdout.write(out.split("\n")[0]); process.exit(0); }
+    process.exit(1);
+  ' "$ENGINE_BIN" 2>/dev/null
+}
+
+node_sqlite_check() {
+  "$NODE" -e '
+    const { DatabaseSync } = require("node:sqlite");
+    const db = new DatabaseSync(process.argv[1]);
+    db.exec("PRAGMA journal_mode = WAL;");
+    db.exec("PRAGMA busy_timeout = 3000;");
+    const n = db.prepare("SELECT count(*) AS n FROM sqlite_master").get().n;
+    db.close();
+    process.stdout.write(String(n));
+  ' "$WB_DB" 2>/dev/null
+}
+
+cmd_doctor() {
+  fails=0
+  warns=0
+  say "workbench doctor"
+  say "  WB_HOME      $WB_HOME"
+  say "  WB_CODE      $WB_CODE"
+  say "  WB_WORKSPACE $WB_WORKSPACE"
+  say "  WB_DB        $WB_DB"
+  say "  配置         ${ENV_FILE:-（没有配置文件，使用默认值/环境变量）}"
+  say ""
+
+  # 1. node
+  if [ -z "$NODE" ] || [ ! -x "$NODE" ]; then
+    bad node "找不到 node（应为 $WB_HOME/bin/node）；重装安装包或检查 WB_NODE"
+    fails=$((fails + 1))
+  else
+    nv=$("$NODE" -v 2>/dev/null || true)
+    if "$NODE" -e 'const m=process.versions.node.split(".").map(Number);process.exit(m[0]>22||(m[0]===22&&m[1]>=5)?0:1)' >/dev/null 2>&1; then
+      ok node "$nv ($NODE)"
+    else
+      bad node "$nv 太旧，内核要求 >= 22.5；换包或装 node 22"
+      fails=$((fails + 1))
+    fi
+  fi
+
+  # 2. 内核文件
+  if [ -f "$KERNEL_SERVER" ] && [ -f "$KERNEL_WORKER" ] && [ -f "$WB_CODE/web/index.html" ]; then
+    kv=$("$NODE" -e 'try{process.stdout.write(require(process.argv[1]).version||"?")}catch(e){process.stdout.write("?")}' "$WB_CODE/package.json" 2>/dev/null || echo "?")
+    ok kernel "$kv ($WB_CODE)"
+  else
+    bad kernel "内核文件缺失（$KERNEL_SERVER 或 $KERNEL_WORKER 或 web/index.html）"
+    fails=$((fails + 1))
+  fi
+
+  # 3. 引擎
+  if [ "$WB_ENGINE" = "mock" ]; then
+    warn engine "WB_ENGINE=mock，不检查 opencode 二进制"
+  elif [ ! -f "$ENGINE_BIN" ]; then
+    bad engine "找不到 ${ENGINE_BIN}；重装安装包，或把 WB_ENGINE_BIN 指到已有二进制"
+    fails=$((fails + 1))
+  elif [ ! -x "$ENGINE_BIN" ]; then
+    bad engine "$ENGINE_BIN 不可执行（chmod 755）"
+    fails=$((fails + 1))
+  else
+    ev=$(node_engine_version || true)
+    if [ -n "$ev" ]; then
+      ok engine "$ev ($ENGINE_BIN)"
+    else
+      bad engine "$ENGINE_BIN --version 跑不通（架构不对/缺 glibc？）；本机 uname -m=$(uname -m)"
+      fails=$((fails + 1))
+    fi
+  fi
+
+  # 4. 工作区可写
+  if ensure_dirs && [ -w "$WB_WORKSPACE" ] && [ -w "$WB_ROOT" ]; then
+    probe=$STATE_DIR/.doctor-probe.$$
+    if ( : >"$probe" ) 2>/dev/null && rm -f "$probe"; then
+      ok workspace "$WB_WORKSPACE 可写"
+    else
+      bad workspace "$WB_WORKSPACE 不可写；chown -R 运行用户 $WB_WORKSPACE"
+      fails=$((fails + 1))
+    fi
+  else
+    bad workspace "建不了或写不进 $WB_WORKSPACE / ${WB_ROOT}；检查目录权限与磁盘"
+    fails=$((fails + 1))
+  fi
+
+  # 5. 端口
+  if node_port_free; then
+    ok port "$WB_HOST:$WB_PORT 空闲"
+  elif node_health; then
+    warn port "$WB_HOST:$WB_PORT 已被本机 workbench 占用（服务在跑，up 不会再启动一份）"
+    warns=$((warns + 1))
+  else
+    bad port "$WB_HOST:$WB_PORT 被别的程序占着；改 WB_PORT（${ENV_FILE:-配置文件}）或用 lsof -nP -i :$WB_PORT 查"
+    fails=$((fails + 1))
+  fi
+
+  # 6. LLM（只报有没有，绝不打印 key）
+  llm_url=未配置
+  llm_model=未配置
+  llm_key=未配置
+  [ -n "${WB_LLM_BASE_URL:-}" ] && llm_url=已配置
+  [ -n "${WB_LLM_MODEL:-}" ] && llm_model=$WB_LLM_MODEL
+  [ -n "${WB_LLM_API_KEY:-}" ] && llm_key=已配置
+  if [ "$WB_ENGINE" = "mock" ]; then
+    warn llm "WB_ENGINE=mock（base_url=$llm_url model=$llm_model key=${llm_key}）"
+    warns=$((warns + 1))
+  elif [ "$llm_url" = "未配置" ] || [ "$llm_model" = "未配置" ] || [ "$llm_key" = "未配置" ]; then
+    warn llm "base_url=$llm_url model=$llm_model key=${llm_key}；真跑任务前填 WB_LLM_* （${ENV_FILE:-配置文件}）"
+    warns=$((warns + 1))
+  else
+    ok llm "base_url=$llm_url model=$llm_model key=已配置"
+  fi
+
+  # 7. sqlite
+  if [ -z "$NODE" ] || [ ! -x "$NODE" ]; then
+    bad sqlite "没有可用的 node，跳过"
+    fails=$((fails + 1))
+  else
+    n=$(node_sqlite_check || true)
+    if [ -n "$n" ]; then
+      ok sqlite "${WB_DB}（sqlite_master $n 行）"
+    elif n=$("$NODE" --experimental-sqlite -e '
+        const { DatabaseSync } = require("node:sqlite");
+        const db = new DatabaseSync(process.argv[1]); db.close(); process.stdout.write("0");
+      ' "$WB_DB" 2>/dev/null) && [ -n "$n" ]; then
+      warn sqlite "$WB_DB 需要 --experimental-sqlite（node 22.5~22.12）；升级到 22.13+ 更稳"
+      warns=$((warns + 1))
+    else
+      bad sqlite "打不开 ${WB_DB}；确认 node 带 node:sqlite、目录可写、没有别的进程锁死"
+      fails=$((fails + 1))
+    fi
+  fi
+
+  # 8. 磁盘
+  avail=$(df -Pk "$WB_WORKSPACE" 2>/dev/null | awk 'NR==2 {print $4}' || true)
+  case "$avail" in
+    ''|*[!0-9]*) warn disk "读不到 $WB_WORKSPACE 的剩余空间（df 失败）"; warns=$((warns + 1)) ;;
+    *)
+      mb=$((avail / 1024))
+      if [ "$mb" -lt 200 ]; then
+        bad disk "只剩 ${mb}MB（<200MB）；清磁盘或把 WB_WORKSPACE 挪到大盘"
+        fails=$((fails + 1))
+      elif [ "$mb" -lt 2048 ]; then
+        warn disk "只剩 ${mb}MB（<2GB）；每个任务的 worktree 都要空间"
+        warns=$((warns + 1))
+      else
+        ok disk "剩余 $((mb / 1024))GB"
+      fi
+      ;;
+  esac
+
+  say ""
+  if [ "$fails" -gt 0 ]; then
+    say "doctor: $fails 项失败，$warns 项警告 —— 先修失败项。配置文件: ${ENV_FILE:-（未使用配置文件）}"
+    exit 2
+  fi
+  say "doctor: 全部通过（$warns 项警告）"
+  exit 0
+}
+
+cmd_version() {
+  need_node
+  pv=$("$NODE" -e 'try{process.stdout.write(require(process.argv[1]).version||"?")}catch(e){process.stdout.write("?")}' "$WB_CODE/package.json" 2>/dev/null || echo "?")
+  say "workbench   $pv"
+  say "kernel      $WB_CODE"
+  say "node        $("$NODE" -v 2>/dev/null || echo '?') ($NODE)"
+  if [ -x "$ENGINE_BIN" ]; then
+    say "opencode    $(node_engine_version || echo '?') ($ENGINE_BIN)"
+  else
+    say "opencode    （缺 ${ENGINE_BIN}）"
+  fi
+  [ -f "$WB_HOME/engine/VERSION" ] && say "engine      $(cat "$WB_HOME/engine/VERSION")"
+  say "engine cfg  WB_ENGINE=$WB_ENGINE"
+}
+
+start_one() {
+  name=$1
+  shift
+  logf=$LOG_DIR/$name.log
+  : >>"$logf"
+  chmod 600 "$logf" 2>/dev/null || true
+  # 注意：不要写成 `( cd X && nohup cmd & echo $! )`——bash 会把整个 AND-list
+  # 放进一个后台子 shell，那个子 shell 一直持有命令替换的 stdout 管道不关，
+  # `pid=$(start_one ...)` 会永久挂起（worker 因此从未被启动）。
+  # 这里让 cd 同步执行，只有 nohup 进后台，并断掉 stdin，pid 就是进程本身。
+  ( cd "$WB_ROOT" || exit 1
+    nohup "$@" >>"$logf" 2>&1 </dev/null &
+    echo $! >"$PID_DIR/$name.pid" ) || return 1
+  pid=$(cat "$PID_DIR/$name.pid" 2>/dev/null || echo "")
+  [ -n "$pid" ] || return 1
+  printf '%s' "$pid"
+}
+
+cmd_up() {
+  need_node
+  ensure_dirs || die "建不了工作区 $WB_WORKSPACE"
+  if node_health; then
+    say "· workbench 已经在跑（$WB_HOST:${WB_PORT}），没有重复启动"
+    cmd_status
+    return 0
+  fi
+  spid=$(read_pid server || true)
+  if pid_alive "${spid:-}"; then
+    die "server 进程 $spid 还在但端口不响应；先 wb down，再看 $LOG_DIR/server.log"
+  fi
+
+  # 起始仓库/账本目录：失败不阻断启动（任务提交时会再报），但要说出来。
+  if ! "$NODE" "$KERNEL_WORKER" workspace --dir "$WB_WORKSPACE" >/dev/null 2>"$STATE_DIR/workspace.err"; then
+    warn workspace "建起始仓库失败，见 $STATE_DIR/workspace.err（git 是否装了？）"
+  fi
+
+  spid=$(start_one server "$NODE" "$KERNEL_SERVER")
+  if [ -z "$spid" ]; then
+    die "server 起不来；看 $LOG_DIR/server.log"
+  fi
+  wpid=$(start_one worker "$NODE" "$KERNEL_WORKER" run)
+  [ -n "$wpid" ] || die "worker 起不来；看 $LOG_DIR/worker.log"
+
+  i=0
+  while [ "$i" -lt 60 ]; do
+    if node_health; then
+      say ""
+      say "✓ workbench 已启动"
+      say "  地址    http://$WB_HOST:$WB_PORT/  （本机可用 http://127.0.0.1:$WB_PORT/）"
+      say "  进程    server=$spid worker=$wpid"
+      say "  工作区  $WB_WORKSPACE"
+      say "  引擎    $WB_ENGINE"
+      say "  日志    $LOG_DIR/server.log · $LOG_DIR/worker.log"
+      if grep -q '一次性口令' "$LOG_DIR/server.log" 2>/dev/null; then
+        say "  登录    首次启动生成了一次性口令，见: grep '一次性口令' $LOG_DIR/server.log"
+      fi
+      return 0
+    fi
+    if ! pid_alive "$spid"; then
+      break
+    fi
+    i=$((i + 1))
+    sleep 0.25
+  done
+  say ""
+  say "✗ server 没起来（看最后 20 行）:"
+  tail -n 20 "$LOG_DIR/server.log" 2>/dev/null || true
+  kill "$spid" 2>/dev/null || true
+  kill "$wpid" 2>/dev/null || true
+  rm -f "$PID_DIR/server.pid" "$PID_DIR/worker.pid" 2>/dev/null || true
+  exit 2
+}
+
+stop_one() {
+  name=$1
+  pid=$(read_pid "$name" || true)
+  if ! pid_alive "${pid:-}"; then
+    rm -f "$PID_DIR/$name.pid" 2>/dev/null || true
+    return 1
+  fi
+  kill -TERM "$pid" 2>/dev/null || true
+  i=0
+  while [ "$i" -lt 50 ] && pid_alive "$pid"; do
+    i=$((i + 1))
+    sleep 0.2
+  done
+  if pid_alive "$pid"; then
+    kill -KILL "$pid" 2>/dev/null || true
+  fi
+  rm -f "$PID_DIR/$name.pid" 2>/dev/null || true
+  return 0
+}
+
+cmd_down() {
+  n=0
+  stop_one worker && n=$((n + 1))
+  stop_one server && n=$((n + 1))
+  if [ "$n" -eq 0 ] && node_health; then
+    if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet workbench-server 2>/dev/null; then
+      say "· 服务由 systemd 管着，用: systemctl stop workbench-server workbench-worker"
+      return 1
+    fi
+    say "· 端口还在响应但没有 pid 文件；可能是别处启动的 workbench"
+    return 1
+  fi
+  if [ "$n" -gt 0 ]; then
+    say "✓ 已停止 $n 个进程"
+  else
+    say "· 没有在跑的进程"
+  fi
+  return 0
+}
+
+cmd_status() {
+  need_node
+  say "workbench"
+  say "  工作区  $WB_WORKSPACE"
+  spid=$(read_pid server || true)
+  wpid=$(read_pid worker || true)
+  if pid_alive "${spid:-}"; then s="server=$spid 在跑"; else s="server 没跑"; fi
+  if pid_alive "${wpid:-}"; then w="worker=$wpid 在跑"; else w="worker 没跑"; fi
+  say "  进程    $s · $w"
+  if node_health; then
+    say "  端口    $WB_HOST:$WB_PORT 可访问"
+    "$NODE" -e '
+      const http = require("http");
+      http.get({ host: "127.0.0.1", port: Number(process.argv[1]), path: "/api/health", timeout: 1500 }, (res) => {
+        let b = "";
+        res.on("data", (d) => (b += d));
+        res.on("end", () => {
+          try {
+            const h = JSON.parse(b);
+            const w = h.worker || {};
+            console.log("  健康    ok pid=" + h.pid + " uptime=" + h.uptime_s + "s engine=" + h.engine + " version=" + (h.version || "?"));
+            console.log("  执行器  " + (w.state || w.status || (Object.keys(w).length ? JSON.stringify(w) : "无心跳")));
+          } catch { console.log("  健康    " + b.slice(0, 200)); }
+        });
+      }).on("error", () => process.exit(1));
+    ' "$WB_PORT" 2>/dev/null || say "  健康    取不到 /api/health"
+  else
+    say "  端口    $WB_HOST:$WB_PORT 不通"
+  fi
+  if [ -f "$WB_DB" ]; then
+    say "  账本    $WB_DB"
+  fi
+  uname_s=$(uname -s 2>/dev/null || echo "?")
+  if [ "$uname_s" = "Linux" ] && command -v systemctl >/dev/null 2>&1; then
+    if systemctl is-active --quiet workbench-server 2>/dev/null; then
+      say "  systemd workbench-server 在跑（日志: journalctl -u workbench-server）"
+    fi
+  fi
+}
+
+cmd_logs() {
+  follow=0
+  lines=${WB_LOG_LINES:-80}
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      -f|--follow) follow=1 ;;
+      -n) shift; lines=${1:-80} ;;
+      *) ;;
+    esac
+    shift
+  done
+  files="$LOG_DIR/server.log $LOG_DIR/worker.log"
+  if [ "$follow" -eq 1 ]; then
+    say "· tail -f ${files}（Ctrl-C 退出）"
+    exec tail -f -n "$lines" $files
+  fi
+  tail -n "$lines" $files 2>/dev/null || say "（还没有日志：先 wb up）"
+}
+
+cmd_workspace() {
+  need_node
+  ensure_dirs || die "建不了工作区 $WB_WORKSPACE"
+  "$NODE" "$KERNEL_WORKER" workspace --dir "$WB_WORKSPACE" | "$NODE" -e '
+    let b = ""; process.stdin.on("data", (d) => (b += d)).on("end", () => {
+      try { console.log(JSON.stringify(JSON.parse(b), null, 2)); } catch { console.log(b.trim()); }
+    });
+  '
+}
+
+cmd=${1:-help}
+[ $# -gt 0 ] && shift
+
+case "$cmd" in
+  doctor) cmd_doctor ;;
+  version|--version|-v) cmd_version ;;
+  up|start) cmd_up ;;
+  down|stop) cmd_down ;;
+  status) cmd_status ;;
+  logs) cmd_logs "$@" ;;
+  workspace) cmd_workspace ;;
+  help|-h|--help) usage ;;
+  *) say "未知命令: $cmd"; usage; exit 2 ;;
+esac

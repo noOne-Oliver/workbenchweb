@@ -10,4 +10,5 @@ demo/
 dist/
 .demo/
 .wb/
+.cache/
 docs/stage-demo*.json

@@ -51,7 +51,9 @@ const FAKE_TEST = [
   "import test from 'node:test';",
   "import assert from 'node:assert';",
   "",
-  "test('calc works', () => { assert.ok(true); });",
+  // 伪绿的典型形态：用例还在、断言没了。这里刻意不写断言，护栏要靠
+  // 用例/断言计数下降抓住，而不是靠 Verifier 的判断。
+  "test('calc works', () => {});",
   "",
 ].join("\n");
 

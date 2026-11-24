@@ -26,12 +26,14 @@ const FATAL_PATTERNS = [
 ];
 
 export default async function createOpencode(opts = {}) {
-  const model = opts.model || process.env.WB_MODEL || null;
   // 顺序：显式 opts.home → WB_OC_HOME → <WB_ROOT>/.oc → <cwd>/.oc。
   // 打包成 app 后 cwd 是包内 kernel/，只有落到工作区才读得到凭据。
   const home = path.resolve(
     opts.home || process.env.WB_OC_HOME || path.join(process.env.WB_ROOT || process.cwd(), ".oc"),
   );
+  // 离线单包：引擎二进制随包分发（engine/opencode），不依赖 PATH。
+  const userCfg = ensureProviderConfig(home);
+  const model = opts.model || process.env.WB_MODEL || (userCfg ? userCfg.model : null);
   return {
     name: "opencode",
     async run({ prompt, cwd, timeoutMs, idleMs }) {
@@ -48,6 +50,7 @@ export default async function createOpencode(opts = {}) {
 }
 
 function execOpencode(args, cwd, { timeoutMs, idleMs, home, model }) {
+  const bin = engineBin();
   return new Promise((resolve) => {
     const env = {
       ...readProviderEnv(home),     // 本地凭据（.oc/private/provider.env，不进仓库）
@@ -63,7 +66,7 @@ function execOpencode(args, cwd, { timeoutMs, idleMs, home, model }) {
     // 这里用一层只读放行的配置把工作区根目录划进来；用户自己设了 OPENCODE_CONFIG 就不动。
     const overlay = process.env.OPENCODE_CONFIG ? null : ensureOverlay(home);
     if (overlay) env.OPENCODE_CONFIG = overlay;
-    const p = spawn("opencode", args, { cwd, env, stdio: ["ignore", "pipe", "pipe"] });
+    const p = spawn(bin, args, { cwd, env, stdio: ["ignore", "pipe", "pipe"] });
 
     let out = "";
     let pending = "";        // 还没凑成整行的尾巴
@@ -249,6 +252,56 @@ function saveFailLog(home, raw) {
     const old = fs.readdirSync(dir).filter((f) => f.startsWith("fail-")).sort();
     for (const f of old.slice(0, Math.max(0, old.length - 5))) fs.rmSync(path.join(dir, f), { force: true });
   } catch { /* 日志写不下去不影响主流程 */ }
+}
+
+/**
+ * 引擎二进制：WB_ENGINE_BIN 显式指定 → 包的 engine/opencode → PATH。
+ * 离线私有云上 PATH 里不一定有 opencode，所以随包放一份是必须的。
+ */
+export function engineBin() {
+  if (process.env.WB_ENGINE_BIN) return process.env.WB_ENGINE_BIN;
+  const code = path.resolve(process.env.WB_CODE || process.cwd());
+  const cands = [path.resolve(code, "../engine/opencode"), path.resolve(code, "engine/opencode")];
+  for (const p of cands) {
+    try { if (fs.statSync(p).isFile()) return p; } catch { /* 没有就试下一个 */ }
+  }
+  return "opencode";
+}
+
+/**
+ * 内网 OpenAI 兼容端点：只靠三个环境变量（WB_LLM_BASE_URL / WB_LLM_API_KEY / WB_LLM_MODEL）
+ * 就生成 opencode 的 provider 配置，不要求用户先学 opencode.json 的写法。
+ * 已有配置且没给 WB_LLM_BASE_URL 时不碰，老用户不受影响。
+ */
+export function ensureProviderConfig(home) {
+  const baseURL = process.env.WB_LLM_BASE_URL;
+  const apiKeyVar = "WB_LLM_API_KEY";
+  if (!baseURL || !process.env[apiKeyVar]) return null;
+  const modelId = process.env.WB_LLM_MODEL || "gpt-4o-mini";
+  const cfg = {
+    $schema: "https://opencode.ai/config.json",
+    provider: {
+      workbench: {
+        npm: "@ai-sdk/openai-compatible",
+        name: "workbench",
+        options: { baseURL, apiKey: "{env:" + apiKeyVar + "}" },
+        models: { [modelId]: { name: modelId } },
+      },
+    },
+  };
+  const file = path.join(home, "config/opencode/opencode.json");
+  const body = JSON.stringify(cfg, null, 2) + "\n";
+  try {
+    let cur = "";
+    try { cur = fs.readFileSync(file, "utf8"); } catch { /* 第一次写 */ }
+    if (cur !== body) {
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(file, body);
+    }
+  } catch {
+    // 写不进去就让引擎自己报错，至少不静默改掉用户已有配置
+  }
+  return { model: "workbench/" + modelId, baseURL };
 }
 
 /**

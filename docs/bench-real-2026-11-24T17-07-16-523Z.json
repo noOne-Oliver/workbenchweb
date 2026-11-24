@@ -1,0 +1,151 @@
+{
+  "engine": "builtin",
+  "model": null,
+  "tasks": 5,
+  "done": 5,
+  "success_rate": 1,
+  "total_tokens": 2126387,
+  "avg_tokens": 425277,
+  "avg_machine_seconds": 312,
+  "total_seconds": 1560,
+  "retried": 0,
+  "sizes": {
+    "small": 2,
+    "normal": 2,
+    "large": 1
+  },
+  "checks_failed": [],
+  "human_decisions": 10,
+  "tokens_by_role": {
+    "coder": 497594,
+    "verifier": 668209,
+    "lead": 66642,
+    "reviewer": 732418,
+    "architect": 161524
+  },
+  "note": "review_seconds/approval_seconds 是脚本代劳的下限（人没真读），真实人工耗时见 docs/real-review 那单的 4 秒",
+  "rows": [
+    {
+      "key": "slugify",
+      "id": "t_mwuy6f720pxzi",
+      "title": "实现 src/text.mjs 导出 slugify(s)：转小写、非字母数字转 -、去首尾 -、连续 - 压成一个",
+      "size": "small",
+      "roles": [
+        "coder",
+        "verifier"
+      ],
+      "checks": [],
+      "state": "done",
+      "attempts": 1,
+      "tokens": 47118,
+      "machine_seconds": 62,
+      "review_seconds": 1,
+      "approval_seconds": 1,
+      "guards_pass": "6/6",
+      "tests": 8,
+      "tests_failed": 0,
+      "diff_stat": "2 files changed, 50 insertions(+), 1 deletion(-)",
+      "merge_sha": "d803e40df6bcb7d0057906524cf1ab2af8da0201",
+      "error": null
+    },
+    {
+      "key": "median",
+      "id": "t_mwuy7r2z16hsr",
+      "title": "实现 src/num.mjs 导出 median(nums)：偶数个取中间两数均值，空数组抛 Error('empty')",
+      "size": "small",
+      "roles": [
+        "coder",
+        "verifier"
+      ],
+      "checks": [],
+      "state": "done",
+      "attempts": 1,
+      "tokens": 61337,
+      "machine_seconds": 68,
+      "review_seconds": 1,
+      "approval_seconds": 1,
+      "guards_pass": "6/6",
+      "tests": 15,
+      "tests_failed": 0,
+      "diff_stat": "2 files changed, 80 insertions(+), 1 deletion(-)",
+      "merge_sha": "d99843aea634bb8ce3abe97215c75387073e077e",
+      "error": null
+    },
+    {
+      "key": "merge-utils",
+      "id": "t_mwuy97p72bdxv",
+      "title": "把 src/text.mjs 的 slugify 与 src/num.mjs 的 median 收进 src/utils.mjs，原文件改为 re-export，补测试",
+      "size": "normal",
+      "roles": [
+        "lead",
+        "coder",
+        "verifier",
+        "reviewer"
+      ],
+      "checks": [],
+      "state": "done",
+      "attempts": 1,
+      "tokens": 332946,
+      "machine_seconds": 235,
+      "review_seconds": 1,
+      "approval_seconds": 1,
+      "guards_pass": "6/6",
+      "tests": 33,
+      "tests_failed": 0,
+      "diff_stat": "5 files changed, 221 insertions(+), 51 deletions(-)",
+      "merge_sha": "70abd7f8b2b210c0f65d63e83e856da860aeee6f",
+      "error": null
+    },
+    {
+      "key": "truncate-long",
+      "id": "t_mwuye90y32qyc",
+      "title": "给 src/text.mjs 加 truncate(s, n)：超长时截断并补省略号，省略号计入总长；n<=0 或 n 小于省略号长度时返回空串；字符串含代理对（emoji）时不得截断半个字符，要按完整码点处理；另需处理首尾空白与连续空格的折叠，并补覆盖上述各分支的测试",
+      "size": "normal",
+      "roles": [
+        "lead",
+        "coder",
+        "verifier",
+        "reviewer"
+      ],
+      "checks": [],
+      "state": "done",
+      "attempts": 1,
+      "tokens": 475655,
+      "machine_seconds": 441,
+      "review_seconds": 1,
+      "approval_seconds": 1,
+      "guards_pass": "6/6",
+      "tests": 56,
+      "tests_failed": 0,
+      "diff_stat": "3 files changed, 248 insertions(+), 2 deletions(-)",
+      "merge_sha": "f1edd8e35ea611243d1f02f61c2831df65f08847",
+      "error": null
+    },
+    {
+      "key": "refactor-range",
+      "id": "t_mwuynp3s4jt0d",
+      "title": "重构 src/range.mjs 的区间解析：支持 '1-5,8,10-12' 多段与逆序区间报错 Error('invalid range')，保持纯函数（并发安全），并补测试",
+      "size": "large",
+      "roles": [
+        "lead",
+        "architect",
+        "coder",
+        "verifier",
+        "reviewer"
+      ],
+      "checks": [],
+      "state": "done",
+      "attempts": 1,
+      "tokens": 1209331,
+      "machine_seconds": 754,
+      "review_seconds": 1,
+      "approval_seconds": 1,
+      "guards_pass": "6/6",
+      "tests": 84,
+      "tests_failed": 0,
+      "diff_stat": "4 files changed, 388 insertions(+), 3 deletions(-)",
+      "merge_sha": "cadb6e28f6672d78c2fcce0b20a248641744a04e",
+      "error": null
+    }
+  ]
+}
