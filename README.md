@@ -9,7 +9,9 @@
 
 其余全部自动重试、自动升级、自动归档、自动合并 —— 人不是值班员，是签字的人。
 
-`Node.js ≥ 22.5` · `MIT` · `npm test` 123 项全过 · 默认 `mock` 引擎零成本 · 一台机器当 runner，其他人用浏览器 · 可打成离线单包（自带 node + 引擎）
+[![CI](https://github.com/noOne-Oliver/workbenchweb/actions/workflows/ci.yml/badge.svg)](https://github.com/noOne-Oliver/workbenchweb/actions/workflows/ci.yml)
+
+`Node.js ≥ 22.5` · `MIT` · `npm test` 124 项全过 · 默认 `mock` 引擎零成本 · 一台机器当 runner，其他人用浏览器 · 可打成离线单包（自带 node + 引擎）
 
 > 仓库分工：这里只有 **Web 版**（内核 + 服务端 + 浏览器界面）。macOS 桌面版（把同一套内核打包成 `.app`）在 [noOne-Oliver/workbench](https://github.com/noOne-Oliver/workbench)，两边**不共享任何文件**。
 
@@ -451,9 +453,11 @@ node scripts/verify-bundle.mjs --target darwin-arm64   # 本机实测全绿：96
 | 5 | 提交任务 → mock 第一轮伪绿被护栏拦下 → 第二轮通过 → 到 `awaiting_review`；账本里有 `to=verifying` 迁移、护栏 6 项、token 花费 |
 | 6 | `wb down` 两个进程都停、端口关闭、pid 文件清理 |
 
-实测：darwin-arm64 包 **96.9 MB**（node 22.23.5 + opencode 1.19.6），验收 `VERIFY OK`；linux-x64 包 **123.9 MB** 已产出，但**本机是 macOS，没法在 darwin 上验收 Linux 包**——这条要在目标私有云机器上跑一次同样的 `verify:bundle`，不要拿「包生成了」当「能跑」。
+实测：darwin-arm64 包 **96.9 MB**（node 22.23.5 + opencode 1.19.6），本机验收 `VERIFY OK`；linux-x64 包 **123.9 MB**，由 GitHub Actions 的 `ubuntu-22.04` job 用同一套六条断言验收（真解包、真起服务、真跑任务、真收工），产物作为 artifact 保留 7 天。两边都不是拿「包生成了」当「能跑」——验收命令就是上面的 `verify:bundle`。
 
 > 已知限制：Linux 包要求 glibc（内嵌引擎是 Bun 单文件，依赖 NSS/DNS 符号），musl/Alpine 不支持；`data/` 与业务仓库在运行时才建；模型端点必须可达。详见包内 `README-OFFLINE.md`。
+
+**持续集成（`.github/workflows/ci.yml`）每次 push 都跑三件事**：ubuntu-22.04 上 `npm test` 124 项 + 三个确定性演示（阶段链 / 两段评审 / 护栏重试）；组装并验收 linux-x64 包；在 macos-15 上组装并验收 darwin-arm64 包。两个包都作为 artifact 保留 7 天。页首的 CI 徽章就是这条流水线的真实状态。
 
 ### 接真引擎（可选，会花 token）
 
@@ -631,7 +635,8 @@ npm run shots                                    # 重新生成界面截图（�
 npm run bundle:linux                             # 打私有云离线包 → dist/workbench-linux-x64.tar.gz
 npm run bundle:darwin                            # 打 macOS 开发包（本机验收用）
 npm run verify:bundle                            # 把包解到临时前缀，真起服务、真跑任务、真收工
-npm test                                         # 内核测试（123 项）
+npm run demo:retry                               # 护栏打回 → 重做 → 通过的端到端演示（mock，3 秒）
+npm test                                         # 内核测试（124 项）
 ```
 
 ### 环境变量
@@ -765,7 +770,7 @@ web/          审阅收件箱（三栏 / 新建任务 / 按文件分组 diff / �
 bin/wb        离线包运维台（doctor/up/down/status/logs/workspace），POSIX sh，无依赖
 packaging/    离线包安装脚本、卸载脚本、配置样例、包内 README、许可证
 sandbox/demo/ 演示用目标仓库（有真测试，能真跑）
-tests/        内核测试（123 项）
+tests/        内核测试（124 项）
 scripts/      启动器、demo 重置 / 重试 / 阶段链演示、引擎体检、真引擎/ builtin 基准、
               离线包组装（bundle.mjs）与验收（verify-bundle.mjs）、截图与配图
 ```
