@@ -53,7 +53,7 @@ jobs:
   bundle-darwin:
     name: darwin-arm64 离线包
     needs: test
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
