@@ -3,7 +3,7 @@ import { getTask, listTasks, transition, record, spendBudget, addEvidence, overB
 import { acquire, renew, release, reclaimExpired, reclaimDead } from "../core/lease.mjs";
 import { hostname } from "node:os";
 import { getProvider } from "./engine.mjs";
-import { sh, ensureWorktree, resetToBase, commitAll, diffStat, diffPatch, headSha, isGitRepo, statusPorcelain, newlyDirty, restorePaths } from "./worktree.mjs";
+import { sh, ensureWorktree, resetToBase, commitAll, diffStat, diffPatch, headSha, isGitRepo, statusPorcelain, newlyDirty, restorePaths, GIT_ID_ARGS } from "./worktree.mjs";
 import { loadRepoConfig, runGuards } from "./guards.mjs";
 import { classifySize, repoFileCount } from "../core/sizing.mjs";
 import { stageForTask, stageGateFor, completeStageForTask, addBacklog, advanceProject, getProject } from "../core/stages.mjs";
@@ -591,7 +591,7 @@ async function doMerge(db, id, ctx) {
     transition(db, id, "blocked", { actor: ctx.workerId, reason });
     return;
   }
-  const r = sh("git", ["-C", repo, "merge", "--no-ff", "-m", "wb: merge " + t.title, branch]);
+  const r = sh("git", ["-C", repo, ...GIT_ID_ARGS, "merge", "--no-ff", "-m", "wb: merge " + t.title, branch]);
   if (!r.ok) {
     addEvidence(db, id, { merge_error: String(r.out).slice(-2000) }, "evidence.patch");
     transition(db, id, "awaiting_approval", { actor: ctx.workerId, reason: "merge conflict, needs human" });

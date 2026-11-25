@@ -51,9 +51,13 @@ export function removeWorktree({ repo, dir }) {
   if (existsSync(dir)) { try { rmSync(dir, { recursive: true, force: true }); } catch {} }
 }
 
+// 服务器/CI 上往往没有全局 git identity，不显式指定的话第一条提交就失败
+// （报 Author identity unknown）。agent 的提交统一署名 Workbench，不冒用机器主人。
+export const GIT_ID_ARGS = ["-c", "user.name=Workbench", "-c", "user.email=workbench@local"];
+
 export function commitAll(dir, message) {
   sh("git", ["-C", dir, "add", "-A"]);
-  const r = sh("git", ["-C", dir, "commit", "-m", message, "--no-verify"]);
+  const r = sh("git", ["-C", dir, ...GIT_ID_ARGS, "commit", "-m", message, "--no-verify"]);
   if (r.ok) return { ok: true, sha: headSha(dir) };
   if (/nothing to commit|no changes added/i.test(r.out)) return { ok: true, sha: headSha(dir), empty: true };
   return { ok: false, error: r.out };
